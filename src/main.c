@@ -27,6 +27,13 @@ void init_outputs() {
 void init_inputs() {
     // fill in
     //gpio_init(21);
+
+    //defining pins 21-26
+    io_bank0_hw -> io[21].ctrl = GPIO_FUNC_SIO << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
+    io_bank0_hw -> io[26].ctrl = GPIO_FUNC_SIO << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
+
+    //set output enable to 0 to define input for select pins
+    sio_hw -> gpio_oe_clr = (1u << 21) | (1u << 26);
 }
 
 void init_keypad() {
@@ -68,6 +75,18 @@ int main() {
         sio_hw -> gpio_clr = 1u << 25;
         sleep_ms(500);
     //}
+
+    init_inputs();
+    for(;;){
+        if (sio_hw -> gpio_in & (1u << 21)){
+            sio_hw -> gpio_set = (1u << 22) | (1u << 23) | (1u << 24) | (1u << 25);
+        }
+        else if (sio_hw -> gpio_in & (1u << 26)){
+            sio_hw -> gpio_clr = (1u << 22) | (1u << 23) | (1u << 24) | (1u << 25);
+        }
+
+        sleep_ms(10);
+    }
 
     // Never reached.
     return 0;
