@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include "pico/stdlib.h"
+#include <stdbool.h>
 
 //////////////////////////////////////////////////////////////////////////////
 
@@ -38,6 +39,19 @@ void init_inputs() {
 
 void init_keypad() {
     // fill in
+    io_bank0_hw -> io[2].ctrl = GPIO_FUNC_SIO << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
+    io_bank0_hw -> io[3].ctrl = GPIO_FUNC_SIO << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
+    io_bank0_hw -> io[4].ctrl = GPIO_FUNC_SIO << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
+    io_bank0_hw -> io[5].ctrl = GPIO_FUNC_SIO << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
+
+    io_bank0_hw -> io[6].ctrl = GPIO_FUNC_SIO << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
+    io_bank0_hw -> io[7].ctrl = GPIO_FUNC_SIO << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
+    io_bank0_hw -> io[8].ctrl = GPIO_FUNC_SIO << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
+    io_bank0_hw -> io[9].ctrl = GPIO_FUNC_SIO << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
+
+    sio_hw -> gpio_oe_clr = (1u << 2) | (1u << 3) | (1u << 4) | (1u << 5);
+    sio_hw -> gpio_oe_set = (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9);
+    sio_hw -> gpio_clr = (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9);
 }
 
 int main() {
@@ -54,7 +68,7 @@ int main() {
     
     init_outputs();
     
-    //for(;;){
+    /*for(;;){
         //setting each pin to HIGH
         sio_hw -> gpio_set = 1u << 22;
         sleep_ms(500);
@@ -74,19 +88,42 @@ int main() {
         sleep_ms(500);
         sio_hw -> gpio_clr = 1u << 25;
         sleep_ms(500);
-    //}
+    }*/
 
     init_inputs();
-    for(;;){
-        if (sio_hw -> gpio_in & (1u << 21)){
+    
+    /*for(;;){
+        if (!(sio_hw -> gpio_in & (1u << 21))){
             sio_hw -> gpio_set = (1u << 22) | (1u << 23) | (1u << 24) | (1u << 25);
         }
-        else if (sio_hw -> gpio_in & (1u << 26)){
+        else if (!(sio_hw -> gpio_in & (1u << 26))){
             sio_hw -> gpio_clr = (1u << 22) | (1u << 23) | (1u << 24) | (1u << 25);
         }
 
         sleep_ms(10);
+    }*/
+
+    init_keypad();
+
+    int COLS[] = {6, 7, 8, 9};  // COL4=GP6, COL3=GP7, COL2=GP8, COL1=GP9
+    int ROWS[] = {2, 3, 4, 5};  // ROW4=GP2, ROW3=GP3, ROW2=GP4, ROW1=GP5
+    int LEDS[] = {25, 24, 23, 22}; //LED array needed to iterate
+
+    while(true){
+        for(int i = 0; i < 4; i++){
+            sio_hw -> gpio_set = 1u << COLS[i];
+            sleep_ms(10);
+            uint32_t pinval = (sio_hw -> gpio_in & (1u << ROWS[i]));
+        
+        if (pinval == 0){
+            sio_hw -> gpio_clr = (1u << LEDS[i]);
+        }
+        else{
+            sio_hw -> gpio_set = (1u << LEDS[i]);
+        }
+        sio_hw -> gpio_clr = (1u << COLS[i]);
     }
+}
 
     // Never reached.
     return 0;
