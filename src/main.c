@@ -13,6 +13,23 @@ void autotest();
 void init_outputs() {
     // fill in
 
+    hw_write_masked(&pads_bank0_hw->io[22],
+        PADS_BANK0_GPIO0_IE_BITS,
+        PADS_BANK0_GPIO0_IE_BITS | PADS_BANK0_GPIO0_OD_BITS
+    );
+    hw_write_masked(&pads_bank0_hw->io[23],
+        PADS_BANK0_GPIO0_IE_BITS,
+        PADS_BANK0_GPIO0_IE_BITS | PADS_BANK0_GPIO0_OD_BITS
+    );
+    hw_write_masked(&pads_bank0_hw->io[24],
+        PADS_BANK0_GPIO0_IE_BITS,
+        PADS_BANK0_GPIO0_IE_BITS | PADS_BANK0_GPIO0_OD_BITS
+    );
+    hw_write_masked(&pads_bank0_hw->io[25],
+        PADS_BANK0_GPIO0_IE_BITS,
+        PADS_BANK0_GPIO0_IE_BITS | PADS_BANK0_GPIO0_OD_BITS
+    );
+
     //defining pins 22-25
     io_bank0_hw -> io[22].ctrl = GPIO_FUNC_SIO << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
     io_bank0_hw -> io[23].ctrl = GPIO_FUNC_SIO << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
@@ -23,11 +40,25 @@ void init_outputs() {
     sio_hw -> gpio_clr = (1u << 22) | (1u << 23) | (1u << 24) | (1u << 25);
     //setting pins as output
     sio_hw -> gpio_oe_set = (1u << 22) | (1u << 23) | (1u << 24) | (1u << 25);
+
+    hw_clear_bits(&pads_bank0_hw->io[22], PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits(&pads_bank0_hw->io[23], PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits(&pads_bank0_hw->io[24], PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits(&pads_bank0_hw->io[25], PADS_BANK0_GPIO0_ISO_BITS);
 }
 
 void init_inputs() {
     // fill in
     //gpio_init(21);
+
+    hw_write_masked(&pads_bank0_hw->io[21],
+         PADS_BANK0_GPIO0_IE_BITS,
+        PADS_BANK0_GPIO0_IE_BITS | PADS_BANK0_GPIO0_OD_BITS
+    );
+    hw_write_masked(&pads_bank0_hw->io[26],
+        PADS_BANK0_GPIO0_IE_BITS,
+        PADS_BANK0_GPIO0_IE_BITS | PADS_BANK0_GPIO0_OD_BITS
+    );
 
     //defining pins 21-26
     io_bank0_hw -> io[21].ctrl = GPIO_FUNC_SIO << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
@@ -35,10 +66,46 @@ void init_inputs() {
 
     //set output enable to 0 to define input for select pins
     sio_hw -> gpio_oe_clr = (1u << 21) | (1u << 26);
+    hw_clear_bits(&pads_bank0_hw->io[21], PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits(&pads_bank0_hw->io[26], PADS_BANK0_GPIO0_ISO_BITS);
 }
 
 void init_keypad() {
     // fill in
+
+    hw_write_masked(&pads_bank0_hw->io[2],
+        PADS_BANK0_GPIO0_IE_BITS,
+        PADS_BANK0_GPIO0_IE_BITS | PADS_BANK0_GPIO0_OD_BITS
+    );
+    hw_write_masked(&pads_bank0_hw->io[3],
+        PADS_BANK0_GPIO0_IE_BITS,
+        PADS_BANK0_GPIO0_IE_BITS | PADS_BANK0_GPIO0_OD_BITS
+    );
+    hw_write_masked(&pads_bank0_hw->io[4],
+        PADS_BANK0_GPIO0_IE_BITS,
+        PADS_BANK0_GPIO0_IE_BITS | PADS_BANK0_GPIO0_OD_BITS
+    );
+    hw_write_masked(&pads_bank0_hw->io[5],
+        PADS_BANK0_GPIO0_IE_BITS,
+        PADS_BANK0_GPIO0_IE_BITS | PADS_BANK0_GPIO0_OD_BITS
+    );
+    hw_write_masked(&pads_bank0_hw->io[6],
+        PADS_BANK0_GPIO0_IE_BITS,
+        PADS_BANK0_GPIO0_IE_BITS | PADS_BANK0_GPIO0_OD_BITS
+    );
+    hw_write_masked(&pads_bank0_hw->io[7],
+        PADS_BANK0_GPIO0_IE_BITS,
+        PADS_BANK0_GPIO0_IE_BITS | PADS_BANK0_GPIO0_OD_BITS
+    );
+    hw_write_masked(&pads_bank0_hw->io[8],
+        PADS_BANK0_GPIO0_IE_BITS,
+        PADS_BANK0_GPIO0_IE_BITS | PADS_BANK0_GPIO0_OD_BITS
+    );
+    hw_write_masked(&pads_bank0_hw->io[9],
+        PADS_BANK0_GPIO0_IE_BITS,
+        PADS_BANK0_GPIO0_IE_BITS | PADS_BANK0_GPIO0_OD_BITS
+    );
+
     io_bank0_hw -> io[2].ctrl = GPIO_FUNC_SIO << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
     io_bank0_hw -> io[3].ctrl = GPIO_FUNC_SIO << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
     io_bank0_hw -> io[4].ctrl = GPIO_FUNC_SIO << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
@@ -52,6 +119,15 @@ void init_keypad() {
     sio_hw -> gpio_oe_clr = (1u << 2) | (1u << 3) | (1u << 4) | (1u << 5);
     sio_hw -> gpio_oe_set = (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9);
     sio_hw -> gpio_clr = (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9);
+
+    hw_clear_bits(&pads_bank0_hw->io[2], PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits(&pads_bank0_hw->io[3], PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits(&pads_bank0_hw->io[4], PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits(&pads_bank0_hw->io[5], PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits(&pads_bank0_hw->io[6], PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits(&pads_bank0_hw->io[7], PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits(&pads_bank0_hw->io[8], PADS_BANK0_GPIO0_ISO_BITS);
+    hw_clear_bits(&pads_bank0_hw->io[9], PADS_BANK0_GPIO0_ISO_BITS);
 }
 
 int main() {
@@ -67,8 +143,8 @@ int main() {
     // All your code goes below.
     
     init_outputs();
-    
-    /*for(;;){
+    /*
+    for(;;){
         //setting each pin to HIGH
         sio_hw -> gpio_set = 1u << 22;
         sleep_ms(500);
@@ -91,17 +167,17 @@ int main() {
     }*/
 
     init_inputs();
-    
-    /*for(;;){
-        if (!(sio_hw -> gpio_in & (1u << 21))){
-            sio_hw -> gpio_set = (1u << 22) | (1u << 23) | (1u << 24) | (1u << 25);
-        }
-        else if (!(sio_hw -> gpio_in & (1u << 26))){
-            sio_hw -> gpio_clr = (1u << 22) | (1u << 23) | (1u << 24) | (1u << 25);
-        }
 
-        sleep_ms(10);
-    }*/
+    // for(;;){
+    //     if ((sio_hw -> gpio_in & (1u << 21))){
+    //         sio_hw -> gpio_set = (1u << 22) | (1u << 23) | (1u << 24) | (1u << 25);
+    //     }
+    //     else if ((sio_hw -> gpio_in & (1u << 26))){
+    //         sio_hw -> gpio_clr = (1u << 22) | (1u << 23) | (1u << 24) | (1u << 25);
+    //     }
+
+    //     sleep_ms(10);
+    // }
 
     init_keypad();
 
