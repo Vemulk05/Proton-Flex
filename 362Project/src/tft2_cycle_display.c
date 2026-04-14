@@ -5,6 +5,8 @@
 #include "pico/stdlib.h"
 #include "hardware/spi.h"
 #include "hardware/gpio.h"
+#include "hardware/adc.h"
+
 
 // ================= TFT CONFIG =================
 #define TFT_SPI_PORT spi0
@@ -305,6 +307,11 @@ int main()
 
     tft_init();
 
+    // ADC setup for MyoWare ENV signal on GP40 (ADC channel 0)
+    adc_init();
+    adc_gpio_init(40);
+    adc_select_input(0);
+
     // Clear screen
     tft_set_window(0, 0, W - 1, H - 1);
     for (int i = 0; i < W * H; i++)
@@ -328,33 +335,21 @@ int main()
     while (1)
     {
         // === Randomly change BPM every few seconds ===
-        frames_until_change--;
-        if (frames_until_change <= 0)
-        {
-            // Pick new random BPM in range 50-110
-            int new_bpm = 50 + (rand() % 61); // 50 to 110 inclusive
-
-            // Erase old BPM number area (top-left corner where digits are drawn)
-            for (int y = 0; y < 30; y++)
-                for (int x = 0; x < 60; x++)
-                    tft_pixel(x, y, BLACK);
-
-            current_bpm = new_bpm;
-            phase_step = (6.283f * FRAME_MS) / (60000.0f / current_bpm);
-
-            // Redraw BPM label with new number
-            draw_bpm_label(current_bpm);
-
-            // Random interval before next change: 2-6 seconds (40-120 frames)
-            frames_until_change = 40 + (rand() % 81);
-        }
 
         // === Heartbeat pulse ===
-        float s = sinf(phase);
-        float intensity = s > 0 ? s * s * s * s : 0;
-        phase += phase_step;
-        if (phase > 6.283f)
-            phase -= 6.283f;
+       // Read MyoWare ENV signal from ADC (12-bit, 0-4095)
+    uint16_t raw = adc_read();
+    printf("raw=%d\n", raw);
+
+    // Convert to intensity 0.0-1.0
+    // Tune EMG_BASELINE and EMG_MAX based on what you actually see
+    #define EMG_BASELINE 200    // ADC value at rest (idle ENV)
+    #define EMG_MAX      2500   // ADC value at full flex
+    float intensity = 0.0f;
+    if (raw > EMG_BASELINE) {
+        intensity = (float)(raw - EMG_BASELINE) / (EMG_MAX - EMG_BASELINE);
+        if (intensity > 1.0f) intensity = 1.0f;
+    }
 
         // Erase previous blob
         if (last_rx > 0)
