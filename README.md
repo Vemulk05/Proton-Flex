@@ -1,0 +1,1 @@
+This is the Proton Flex project made by the Proton Flexers team of ECE36200 at Purdue University! This project uses MyoWare 2.0 Muscle Sensors to detect the emg activity of certain muscle groups. to be cont.
