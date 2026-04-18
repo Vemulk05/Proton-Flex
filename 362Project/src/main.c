@@ -10,6 +10,8 @@
 #include "hardware/adc.h"
 #include "hardware/pwm.h"
 
+#include "ff.h"
+
 // ================= TFT CONFIG =================
 #define TFT_SPI_PORT spi0
 #define TFT_SCK  2
@@ -21,6 +23,9 @@
 
 #define W 240
 #define H 320
+
+// ================= SD CONFIG =================
+#define SD_CS 6
 
 // ================= PROJECT PINS =================
 #define HAPTIC_PIN 9
@@ -48,10 +53,6 @@
 #define LIVE_FRAME_MS     70
 
 // ================= EMG CONFIG =================
-// IMPORTANT:
-// If your EMG sensor can reach 4V, scale it down before the ADC.
-// Example divider assumption:
-// ADC_voltage = sensor_voltage * 0.6667
 #define ADC_VREF                3.3f
 #define ADC_MAX_COUNTS          4095.0f
 #define EMG_SENSOR_TO_ADC_RATIO 0.6667f
@@ -61,8 +62,6 @@
 #define SENSOR_MAX_VOLTS        4.0f
 
 #define EMG_ALPHA               0.25f
-
-// Set to 1 if you want to test without EMG connected
 #define DEBUG_NO_EMG            0
 
 #define MAX_EVENTS              16
@@ -99,6 +98,8 @@ typedef struct {
 static uint haptic_slice_num;
 static float emg_filtered[3] = {0.0f, 0.0f, 0.0f};
 static int last_region_brightness[3] = {-1, -1, -1};
+static FATFS fs;
+static bool sd_ok = false;
 
 // ================= TFT LOW LEVEL =================
 static void tft_cmd(uint8_t cmd) {
@@ -119,6 +120,13 @@ static void tft_data8(uint8_t v) {
     tft_data(&v, 1);
 }
 
+static void tft_restore_spi(void) {
+    spi_init(TFT_SPI_PORT, 32000000);
+    gpio_set_function(TFT_SCK, GPIO_FUNC_SPI);
+    gpio_set_function(TFT_MOSI, GPIO_FUNC_SPI);
+    gpio_set_function(TFT_MISO, GPIO_FUNC_SPI);
+}
+
 static void tft_init(void) {
     gpio_put(TFT_RST, 1);
     sleep_ms(5);
@@ -134,7 +142,7 @@ static void tft_init(void) {
     sleep_ms(150);
 
     tft_cmd(ILI9341_COLMOD);
-    tft_data8(0x55);   // RGB565
+    tft_data8(0x55);
 
     tft_cmd(ILI9341_MADCTL);
     tft_data8(0x40);
@@ -302,18 +310,6 @@ static void draw_body_outline(void) {
 
     line(cx - 40, 160, cx + 40, 160, WHITE);
     line(cx - 3, 168, cx + 3, 168, WHITE);
-
-    bezier(cx - 40, 160, cx - 34, 205, cx - 28, 245, WHITE);
-    bezier(cx - 28, 245, cx - 24, 275, cx - 22, 280, WHITE);
-    bezier(cx - 3, 168, cx - 10, 210, cx - 12, 250, WHITE);
-    bezier(cx - 12, 250, cx - 13, 270, cx - 14, 280, WHITE);
-    line(cx - 22, 280, cx - 14, 280, WHITE);
-
-    bezier(cx + 40, 160, cx + 34, 205, cx + 28, 245, WHITE);
-    bezier(cx + 28, 245, cx + 24, 275, cx + 22, 280, WHITE);
-    bezier(cx + 3, 168, cx + 10, 210, cx + 12, 250, WHITE);
-    bezier(cx + 12, 250, cx + 13, 270, cx + 14, 280, WHITE);
-    line(cx + 22, 280, cx + 14, 280, WHITE);
 }
 
 // ================= REGION DRAW =================
@@ -324,16 +320,12 @@ static void draw_region_fill(region_t region, uint16_t color) {
         case REGION_FOREARM:
             fill_ellipse(cx + 56, 140, 10, 20, color);
             break;
-
         case REGION_BICEP:
             fill_ellipse(cx + 54, 98, 11, 18, color);
             break;
-
         case REGION_CHEST:
-            // right chest only
-            fill_ellipse(cx + 18, 92, 16, 18, color);
+            fill_ellipse(cx + 18, 92, 16, 18, color); // right chest only
             break;
-
         default:
             break;
     }
@@ -344,23 +336,17 @@ static uint16_t region_color_from_brightness(region_t region, uint8_t b) {
 
     switch (region) {
         case REGION_FOREARM: {
-            // red
-            uint8_t r5 = (b * 31) / 255;
+            uint8_t r5 = (b * 31) / 255;   // red
             return (uint16_t)(r5 << 11);
         }
-
         case REGION_BICEP: {
-            // green
-            uint8_t g6 = (b * 63) / 255;
+            uint8_t g6 = (b * 63) / 255;   // green
             return (uint16_t)(g6 << 5);
         }
-
         case REGION_CHEST: {
-            // blue
-            uint8_t bl5 = (b * 31) / 255;
+            uint8_t bl5 = (b * 31) / 255;  // blue
             return (uint16_t)(bl5);
         }
-
         default:
             return BLACK;
     }
@@ -371,16 +357,12 @@ static void clear_region_box(region_t region) {
         case REGION_FOREARM:
             clear_rect(163, 118, 189, 166);
             break;
-
         case REGION_BICEP:
             clear_rect(161, 78, 187, 120);
             break;
-
         case REGION_CHEST:
-            // right chest only
             clear_rect(120, 72, 156, 112);
             break;
-
         default:
             break;
     }
@@ -528,9 +510,9 @@ static float read_sensor_voltage_raw(region_t region) {
     uint16_t raw = 0;
 
     switch (region) {
-        case REGION_FOREARM: raw = read_adc_channel(0); break; // GPIO40
-        case REGION_BICEP:   raw = read_adc_channel(1); break; // GPIO41
-        case REGION_CHEST:   raw = read_adc_channel(2); break; // GPIO42
+        case REGION_FOREARM: raw = read_adc_channel(0); break;
+        case REGION_BICEP:   raw = read_adc_channel(1); break;
+        case REGION_CHEST:   raw = read_adc_channel(2); break;
         default: return 0.0f;
     }
 
@@ -592,7 +574,23 @@ static region_t strongest_active_region(void) {
 #endif
 }
 
-// ================= PATTERN =================
+// ================= PATTERN + SD HELPERS =================
+static const char *region_name(region_t region) {
+    switch (region) {
+        case REGION_FOREARM: return "FOREARM";
+        case REGION_BICEP:   return "BICEP";
+        case REGION_CHEST:   return "CHEST";
+        default:             return "UNKNOWN";
+    }
+}
+
+static region_t region_from_string(const char *s) {
+    if (strcmp(s, "FOREARM") == 0) return REGION_FOREARM;
+    if (strcmp(s, "BICEP") == 0)   return REGION_BICEP;
+    if (strcmp(s, "CHEST") == 0)   return REGION_CHEST;
+    return REGION_UNKNOWN;
+}
+
 static void build_default_pattern(pattern_t *p) {
     p->count = 5;
     p->events[0] = (pattern_event_t){ .start_ms = 0,    .duration_ms = BUZZ_MS, .region = REGION_CHEST   };
@@ -600,6 +598,103 @@ static void build_default_pattern(pattern_t *p) {
     p->events[2] = (pattern_event_t){ .start_ms = 900,  .duration_ms = BUZZ_MS, .region = REGION_BICEP   };
     p->events[3] = (pattern_event_t){ .start_ms = 1350, .duration_ms = BUZZ_MS, .region = REGION_FOREARM };
     p->events[4] = (pattern_event_t){ .start_ms = 1800, .duration_ms = BUZZ_MS, .region = REGION_CHEST   };
+}
+
+static bool sd_mount_card(void) {
+    gpio_put(TFT_CS, 1);   // de-select TFT before SD access
+    gpio_put(SD_CS, 1);
+
+    FRESULT fr = f_mount(&fs, "0:", 1);
+    return fr == FR_OK;
+}
+
+static bool save_default_pattern_if_missing(const char *path) {
+    FIL fil;
+    FRESULT fr = f_open(&fil, path, FA_READ);
+    if (fr == FR_OK) {
+        f_close(&fil);
+        return true;
+    }
+
+    pattern_t p;
+    build_default_pattern(&p);
+
+    UINT bw;
+    fr = f_open(&fil, path, FA_CREATE_ALWAYS | FA_WRITE);
+    if (fr != FR_OK) return false;
+
+    const char *hdr = "start_ms,duration_ms,region\r\n";
+    if (f_write(&fil, hdr, (UINT)strlen(hdr), &bw) != FR_OK) {
+        f_close(&fil);
+        return false;
+    }
+
+    char line[96];
+    for (size_t i = 0; i < p.count; i++) {
+        int n = snprintf(line, sizeof(line), "%lu,%lu,%s\r\n",
+                         (unsigned long)p.events[i].start_ms,
+                         (unsigned long)p.events[i].duration_ms,
+                         region_name(p.events[i].region));
+        if (f_write(&fil, line, (UINT)n, &bw) != FR_OK) {
+            f_close(&fil);
+            return false;
+        }
+    }
+
+    f_close(&fil);
+    return true;
+}
+
+static bool load_pattern_csv(const char *path, pattern_t *p) {
+    FIL fil;
+    char line[96];
+
+    p->count = 0;
+    FRESULT fr = f_open(&fil, path, FA_READ);
+    if (fr != FR_OK) return false;
+
+    if (!f_gets(line, sizeof(line), &fil)) {
+        f_close(&fil);
+        return false;
+    }
+
+    while (f_gets(line, sizeof(line), &fil) && p->count < MAX_EVENTS) {
+        unsigned long start_ms = 0;
+        unsigned long duration_ms = 0;
+        char region_s[24] = {0};
+
+        if (sscanf(line, "%lu,%lu,%23s", &start_ms, &duration_ms, region_s) == 3) {
+            p->events[p->count].start_ms = (uint32_t)start_ms;
+            p->events[p->count].duration_ms = (uint32_t)duration_ms;
+            p->events[p->count].region = region_from_string(region_s);
+            if (p->events[p->count].region != REGION_UNKNOWN) {
+                p->count++;
+            }
+        }
+    }
+
+    f_close(&fil);
+    return p->count > 0;
+}
+
+static void append_attempt_csv(const char *path, uint32_t score, bool pass) {
+    FIL fil;
+    UINT bw;
+
+    FRESULT fr = f_open(&fil, path, FA_OPEN_APPEND | FA_WRITE);
+    if (fr != FR_OK) {
+        fr = f_open(&fil, path, FA_CREATE_ALWAYS | FA_WRITE);
+        if (fr != FR_OK) return;
+
+        const char *hdr = "score,pass\r\n";
+        f_write(&fil, hdr, (UINT)strlen(hdr), &bw);
+    }
+
+    char line[32];
+    int n = snprintf(line, sizeof(line), "%lu,%u\r\n",
+                     (unsigned long)score, pass ? 1 : 0);
+    f_write(&fil, line, (UINT)n, &bw);
+    f_close(&fil);
 }
 
 // ================= RESULT HAPTIC =================
@@ -688,7 +783,6 @@ static uint32_t run_mimic_mode(const pattern_t *p, bool *pass_out) {
             sleep_ms(p->events[i].start_ms - elapsed);
         }
 
-        // guided cue on same screen
         update_region_overlay(p->events[i].region, 100);
 
         uint32_t detected_ms = 0;
@@ -698,7 +792,6 @@ static uint32_t run_mimic_mode(const pattern_t *p, bool *pass_out) {
             all_correct = false;
             total_error += MATCH_WINDOW_MS;
             update_region_overlay(p->events[i].region, 0);
-            printf("Missed event %u\n", (unsigned)i);
         } else {
             total_error += detected_ms;
 
@@ -707,8 +800,6 @@ static uint32_t run_mimic_mode(const pattern_t *p, bool *pass_out) {
             update_region_overlay(p->events[i].region, b);
 
             haptic_buzz(220, 70);
-            printf("Matched event %u, error=%lu ms\n",
-                   (unsigned)i, (unsigned long)detected_ms);
         }
     }
 
@@ -750,14 +841,15 @@ int main(void) {
     stdio_init_all();
     sleep_ms(1200);
 
-    spi_init(TFT_SPI_PORT, 32000000);
-    gpio_set_function(TFT_SCK, GPIO_FUNC_SPI);
-    gpio_set_function(TFT_MOSI, GPIO_FUNC_SPI);
-    gpio_set_function(TFT_MISO, GPIO_FUNC_SPI);
+    tft_restore_spi();
 
     gpio_init(TFT_CS);
     gpio_set_dir(TFT_CS, GPIO_OUT);
     gpio_put(TFT_CS, 1);
+
+    gpio_init(SD_CS);
+    gpio_set_dir(SD_CS, GPIO_OUT);
+    gpio_put(SD_CS, 1);
 
     gpio_init(TFT_DC);
     gpio_set_dir(TFT_DC, GPIO_OUT);
@@ -772,35 +864,38 @@ int main(void) {
     draw_base_scene();
 
     pattern_t pattern = {0};
-    build_default_pattern(&pattern);
 
-    printf("Pattern loaded\n");
-    for (size_t i = 0; i < pattern.count; i++) {
-        printf("%u: region=%u @ %lu ms for %lu ms\n",
-               (unsigned)i,
-               (unsigned)pattern.events[i].region,
-               (unsigned long)pattern.events[i].start_ms,
-               (unsigned long)pattern.events[i].duration_ms);
+    sd_ok = sd_mount_card();
+    if (sd_ok) {
+        printf("SD mounted\n");
+        save_default_pattern_if_missing("0:/pattern.csv");
+        if (!load_pattern_csv("0:/pattern.csv", &pattern)) {
+            build_default_pattern(&pattern);
+        }
+        tft_restore_spi();
+    } else {
+        printf("SD mount failed, using RAM pattern\n");
+        build_default_pattern(&pattern);
     }
 
     sleep_ms(800);
 
-    // 1. Play target pattern
     play_pattern(&pattern);
 
-    // 2. Matching mode
     bool pass = false;
     uint32_t score = run_mimic_mode(&pattern, &pass);
 
-    // 3. Big centered score screen
+    if (sd_ok) {
+        append_attempt_csv("0:/attempts.csv", score, pass);
+        tft_restore_spi();
+    }
+
     draw_score_screen((int)score, pass);
     show_result_pattern(pass);
 
     printf("Final score: %lu, pass=%u\n", (unsigned long)score, pass ? 1 : 0);
 
     sleep_ms(SCORE_SHOW_MS);
-
-    // 4. Live heatmap mode
     live_heatmap_loop();
 
     return 0;
