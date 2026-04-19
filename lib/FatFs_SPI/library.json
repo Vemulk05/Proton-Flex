@@ -1,0 +1,19 @@
+{
+  "name": "FatFs_SPI",
+  "version": "0.0.1",
+  "build": {
+    "srcDir": ".",
+    "srcFilter": [
+      "-<*>",
+      "+<ff15/source/*.c>",
+      "+<sd_driver/crc.c>",
+      "+<sd_driver/sd_card.c>",
+      "+<sd_driver/sd_spi.c>",
+      "+<sd_driver/spi.c>",
+      "+<src/f_util.c>",
+      "+<src/ff_stdio.c>",
+      "+<src/glue.c>",
+      "+<src/my_debug.c>"
+    ]
+  }
+}

@@ -10,6 +10,8 @@
 #include "hardware/adc.h"
 #include "hardware/pwm.h"
 
+#include "ff.h"
+
 // ================= TFT CONFIG =================
 #define TFT_SPI_PORT spi0
 #define TFT_SCK  2
@@ -22,16 +24,25 @@
 #define W 240
 #define H 320
 
+// ================= SD CONFIG =================
+#define SD_CS 6
+
 // ================= PROJECT PINS =================
 #define HAPTIC_PIN 9
 
-// Current hardware state: one EMG sensor connected on GPIO40/ADC0
+// RP2350B ADC mapping assumed:
+// GPIO40 -> ADC0 -> forearm
+// GPIO41 -> ADC1 -> bicep
+// GPIO42 -> ADC2 -> chest
 #define EMG_FOREARM_PIN 40
+#define EMG_BICEP_PIN   41
+#define EMG_CHEST_PIN   42
 
 // ================= COLORS =================
 #define BLACK   0x0000
 #define WHITE   0xFFFF
 #define RED     0xF800
+#define GREEN   0x07E0
 #define CYAN    0x07FF
 #define DKGRAY  0x4208
 
@@ -40,12 +51,9 @@
 #define MATCH_WINDOW_MS   350
 #define SAMPLE_PERIOD_MS  5
 #define SCORE_SHOW_MS     4000
+#define LIVE_FRAME_MS     70
 
 // ================= EMG CONFIG =================
-// IMPORTANT:
-// If your EMG sensor can reach 4V, scale it down before the ADC.
-// Example divider assumption:
-// ADC_voltage = sensor_voltage * 0.6667
 #define ADC_VREF                3.3f
 #define ADC_MAX_COUNTS          4095.0f
 #define EMG_SENSOR_TO_ADC_RATIO 0.6667f
@@ -55,14 +63,14 @@
 #define SENSOR_MAX_VOLTS        4.0f
 
 #define EMG_ALPHA               0.25f
-
-// Set to 1 if you want to test without EMG connected
 #define DEBUG_NO_EMG            0
 
 #define MAX_EVENTS              16
 
 typedef enum {
     REGION_FOREARM = 0,
+    REGION_BICEP   = 1,
+    REGION_CHEST   = 2,
     REGION_UNKNOWN = 255
 } region_t;
 
@@ -89,10 +97,14 @@ typedef struct {
 
 // ================= GLOBALS =================
 static uint haptic_slice_num;
-static float emg_filtered = 0.0f;
+static float emg_filtered[3] = {0.0f, 0.0f, 0.0f};
+static int last_region_brightness[3] = {-1, -1, -1};
+static FATFS fs;
+static bool sd_ok = false;
 
 // ================= TFT LOW LEVEL =================
 static void tft_cmd(uint8_t cmd) {
+    gpio_put(SD_CS, 1);   // keep SD deselected on shared SPI bus
     gpio_put(TFT_DC, 0);
     gpio_put(TFT_CS, 0);
     spi_write_blocking(TFT_SPI_PORT, &cmd, 1);
@@ -100,6 +112,7 @@ static void tft_cmd(uint8_t cmd) {
 }
 
 static void tft_data(const uint8_t *d, size_t len) {
+    gpio_put(SD_CS, 1);   // keep SD deselected on shared SPI bus
     gpio_put(TFT_DC, 1);
     gpio_put(TFT_CS, 0);
     spi_write_blocking(TFT_SPI_PORT, d, len);
@@ -110,7 +123,19 @@ static void tft_data8(uint8_t v) {
     tft_data(&v, 1);
 }
 
+static void tft_restore_spi(void) {
+    spi_init(TFT_SPI_PORT, 32000000);
+    gpio_set_function(TFT_SCK, GPIO_FUNC_SPI);
+    gpio_set_function(TFT_MOSI, GPIO_FUNC_SPI);
+    gpio_set_function(TFT_MISO, GPIO_FUNC_SPI);
+    gpio_put(TFT_CS, 1);
+    gpio_put(SD_CS, 1);
+}
+
 static void tft_init(void) {
+    gpio_put(SD_CS, 1);
+    gpio_put(TFT_CS, 1);
+
     gpio_put(TFT_RST, 1);
     sleep_ms(5);
     gpio_put(TFT_RST, 0);
@@ -125,7 +150,7 @@ static void tft_init(void) {
     sleep_ms(150);
 
     tft_cmd(ILI9341_COLMOD);
-    tft_data8(0x55);   // RGB565
+    tft_data8(0x55);
 
     tft_cmd(ILI9341_MADCTL);
     tft_data8(0x40);
@@ -167,11 +192,6 @@ static void clear_rect(int x0, int y0, int x1, int y1) {
     if (x1 >= W) x1 = W - 1;
     if (y1 >= H) y1 = H - 1;
 
-<<<<<<< HEAD
-    // All your code goes above.
-    ////////////////////////////////////
-}
-=======
     for (int y = y0; y <= y1; y++) {
         for (int x = x0; x <= x1; x++) {
             tft_pixel(x, y, BLACK);
@@ -247,23 +267,6 @@ static void draw_digit(int x, int y, int d, uint16_t c, int scale) {
     }
 }
 
-static void draw_number(int x, int y, int value, uint16_t c, int scale) {
-    if (value < 0) value = 0;
-    if (value > 999) value = 999;
-
-    int h = value / 100;
-    int t = (value / 10) % 10;
-    int o = value % 10;
-
-    if (h > 0) {
-        draw_digit(x, y, h, c, scale);
-        x += 4 * scale;
-    }
-    draw_digit(x, y, t, c, scale);
-    x += 4 * scale;
-    draw_digit(x, y, o, c, scale);
-}
-
 static void draw_percent_symbol(int x, int y, uint16_t c, int scale) {
     fill_ellipse(x + 2 * scale, y + 2 * scale, scale, scale, c);
     fill_ellipse(x + 8 * scale, y + 8 * scale, scale, scale, c);
@@ -275,6 +278,7 @@ static void draw_percent_symbol(int x, int y, uint16_t c, int scale) {
 static void draw_body_outline(void) {
     int cx = 120;
 
+    // head
     for (int y = -16; y <= 16; y++) {
         for (int x = -13; x <= 13; x++) {
             if (x * x * 16 + y * y * 10 <= 13 * 13 * 16) {
@@ -283,75 +287,183 @@ static void draw_body_outline(void) {
         }
     }
 
-    bezier(cx - 4, 44, cx - 7, 50, cx - 5, 58, WHITE);
-    bezier(cx + 4, 44, cx + 7, 50, cx + 5, 58, WHITE);
+    // neck
+    bezier(cx - 5, 44, cx - 6, 52, cx - 5, 60, WHITE);
+    bezier(cx + 5, 44, cx + 6, 52, cx + 5, 60, WHITE);
 
-    bezier(cx - 5, 58, cx - 30, 50, cx - 48, 70, WHITE);
-    bezier(cx + 5, 58, cx + 30, 52, cx + 48, 72, WHITE);
+    // shoulder caps
+    bezier(cx - 5, 60, cx - 18, 63, cx - 34, 72, WHITE);
+    bezier(cx + 5, 60, cx + 18, 63, cx + 34, 72, WHITE);
 
-    bezier(cx - 48, 70, cx - 55, 90, cx - 42, 105, WHITE);
-    bezier(cx - 42, 105, cx - 28, 120, cx - 30, 135, WHITE);
-    bezier(cx - 30, 135, cx - 36, 150, cx - 40, 160, WHITE);
+    // torso side walls
+    bezier(cx - 34, 72, cx - 36, 112, cx - 30, 160, WHITE);
+    bezier(cx + 34, 72, cx + 36, 112, cx + 30, 160, WHITE);
 
-    bezier(cx + 48, 72, cx + 55, 92, cx + 42, 105, WHITE);
-    bezier(cx + 42, 105, cx + 28, 120, cx + 30, 135, WHITE);
-    bezier(cx + 30, 135, cx + 36, 150, cx + 40, 160, WHITE);
+    // connect shoulder underside to arm inner edge so the arm looks fully attached
+    line(cx - 34, 72, cx - 24, 76, WHITE);
+    line(cx + 34, 72, cx + 24, 76, WHITE);
 
-    for (int y = 60; y < 155; y += 3) {
+    // center line
+    for (int y = 64; y < 155; y += 3) {
         tft_pixel(cx, y, DKGRAY);
     }
 
-    bezier(cx - 48, 70, cx - 62, 90, cx - 62, 115, WHITE);
-    bezier(cx - 62, 115, cx - 64, 140, cx - 60, 162, WHITE);
-    bezier(cx - 38, 78, cx - 48, 100, cx - 48, 118, WHITE);
-    bezier(cx - 48, 118, cx - 50, 140, cx - 48, 160, WHITE);
-    bezier(cx - 60, 162, cx - 54, 168, cx - 48, 160, WHITE);
+    // left arm outer edge
+    bezier(cx - 34, 72, cx - 54, 82, cx - 62, 112, WHITE);
+    bezier(cx - 62, 112, cx - 66, 142, cx - 58, 166, WHITE);
 
-    bezier(cx + 48, 72, cx + 62, 92, cx + 62, 115, WHITE);
-    bezier(cx + 62, 115, cx + 64, 140, cx + 60, 162, WHITE);
-    bezier(cx + 38, 78, cx + 48, 100, cx + 48, 118, WHITE);
-    bezier(cx + 48, 118, cx + 50, 140, cx + 48, 160, WHITE);
-    bezier(cx + 60, 162, cx + 54, 168, cx + 48, 160, WHITE);
+    // left arm inner edge
+    bezier(cx - 24, 76, cx - 42, 88, cx - 48, 116, WHITE);
+    bezier(cx - 48, 116, cx - 50, 144, cx - 46, 166, WHITE);
 
-    line(cx - 40, 160, cx + 40, 160, WHITE);
-    line(cx - 3, 168, cx + 3, 168, WHITE);
+    // left wrist close
+    bezier(cx - 58, 166, cx - 52, 172, cx - 46, 166, WHITE);
 
-    bezier(cx - 40, 160, cx - 34, 205, cx - 28, 245, WHITE);
-    bezier(cx - 28, 245, cx - 24, 275, cx - 22, 280, WHITE);
-    bezier(cx - 3, 168, cx - 10, 210, cx - 12, 250, WHITE);
-    bezier(cx - 12, 250, cx - 13, 270, cx - 14, 280, WHITE);
-    line(cx - 22, 280, cx - 14, 280, WHITE);
+    // right arm outer edge
+    bezier(cx + 34, 72, cx + 54, 82, cx + 62, 112, WHITE);
+    bezier(cx + 62, 112, cx + 66, 142, cx + 58, 166, WHITE);
 
-    bezier(cx + 40, 160, cx + 34, 205, cx + 28, 245, WHITE);
-    bezier(cx + 28, 245, cx + 24, 275, cx + 22, 280, WHITE);
-    bezier(cx + 3, 168, cx + 10, 210, cx + 12, 250, WHITE);
-    bezier(cx + 12, 250, cx + 13, 270, cx + 14, 280, WHITE);
-    line(cx + 22, 280, cx + 14, 280, WHITE);
+    // right arm inner edge
+    bezier(cx + 24, 76, cx + 42, 88, cx + 48, 116, WHITE);
+    bezier(cx + 48, 116, cx + 50, 144, cx + 46, 166, WHITE);
+
+    // right wrist close
+    bezier(cx + 58, 166, cx + 52, 172, cx + 46, 166, WHITE);
+
+    // pelvis
+    line(cx - 30, 160, cx + 30, 160, WHITE);
+    line(cx - 4, 168, cx + 4, 168, WHITE);
+
+    // left leg
+    bezier(cx - 30, 160, cx - 28, 205, cx - 23, 246, WHITE);
+    bezier(cx - 23, 246, cx - 19, 274, cx - 17, 280, WHITE);
+    bezier(cx - 4, 168, cx - 10, 210, cx - 10, 250, WHITE);
+    bezier(cx - 10, 250, cx - 11, 270, cx - 12, 280, WHITE);
+    line(cx - 17, 280, cx - 12, 280, WHITE);
+
+    // right leg
+    bezier(cx + 30, 160, cx + 28, 205, cx + 23, 246, WHITE);
+    bezier(cx + 23, 246, cx + 19, 274, cx + 17, 280, WHITE);
+    bezier(cx + 4, 168, cx + 10, 210, cx + 10, 250, WHITE);
+    bezier(cx + 10, 250, cx + 11, 270, cx + 12, 280, WHITE);
+    line(cx + 17, 280, cx + 12, 280, WHITE);
 }
 
-// ================= FOREARM REGION ONLY =================
-static void draw_forearm_region(uint16_t color) {
+// ================= REGION DRAW =================
+static void draw_region_fill(region_t region, uint16_t color) {
     int cx = 120;
-    fill_ellipse(cx + 56, 140, 10, 20, color);
+
+    switch (region) {
+        case REGION_FOREARM:
+            fill_ellipse(cx + 58, 142, 9, 20, color);
+            break;
+        case REGION_BICEP:
+            fill_ellipse(cx + 55, 102, 11, 17, color);
+            break;
+        case REGION_CHEST:
+            fill_ellipse(cx + 14, 94, 14, 17, color);
+            break;
+        default:
+            break;
+    }
 }
 
-static uint16_t heat_red_from_brightness(uint8_t b) {
+static uint16_t region_color_from_brightness(region_t region, uint8_t b) {
     if (b == 0) return BLACK;
-    uint8_t r5 = (b * 31) / 255;
-    return (uint16_t)(r5 << 11);
+
+    switch (region) {
+        case REGION_FOREARM: {
+            uint8_t r5 = (b * 31) / 255;
+            return (uint16_t)(r5 << 11);
+        }
+        case REGION_BICEP: {
+            uint8_t g6 = (b * 63) / 255;
+            return (uint16_t)(g6 << 5);
+        }
+        case REGION_CHEST: {
+            uint8_t bl5 = (b * 31) / 255;
+            return (uint16_t)(bl5);
+        }
+        default:
+            return BLACK;
+    }
+}
+
+static void clear_region_box(region_t region) {
+    switch (region) {
+        case REGION_FOREARM:
+            clear_rect(164, 118, 188, 168);
+            break;
+        case REGION_BICEP:
+            clear_rect(160, 82, 184, 124);
+            break;
+        case REGION_CHEST:
+            clear_rect(116, 74, 148, 116);
+            break;
+        default:
+            break;
+    }
+}
+
+static void reset_region_cache(void) {
+    for (int i = 0; i < 3; i++) {
+        last_region_brightness[i] = -1;
+    }
 }
 
 static void draw_base_scene(void) {
     clear_screen(BLACK);
     draw_body_outline();
+    reset_region_cache();
 }
 
-static void draw_forearm_overlay(uint8_t brightness) {
-    draw_base_scene();
-    if (brightness > 0) {
-        draw_forearm_region(heat_red_from_brightness(brightness));
+static void update_region_overlay(region_t region, uint8_t brightness) {
+    if (region > REGION_CHEST) return;
+
+    int idx = (int)region;
+    if (last_region_brightness[idx] >= 0) {
+        int diff = (int)brightness - last_region_brightness[idx];
+        if (diff < 0) diff = -diff;
+        if (diff < 4) return;
     }
+
+    clear_region_box(region);
+
+    if (brightness > 0) {
+        draw_region_fill(region, region_color_from_brightness(region, brightness));
+    }
+
     draw_body_outline();
+    last_region_brightness[idx] = brightness;
+}
+
+static void update_all_regions(uint8_t forearm_b, uint8_t bicep_b, uint8_t chest_b) {
+    uint8_t vals[3] = { forearm_b, bicep_b, chest_b };
+    bool changed = false;
+
+    for (int idx = 0; idx < 3; idx++) {
+        uint8_t brightness = vals[idx];
+
+        if (last_region_brightness[idx] >= 0) {
+            int diff = (int)brightness - last_region_brightness[idx];
+            if (diff < 0) diff = -diff;
+            if (diff < 4) continue;
+        }
+
+        region_t region = (region_t)idx;
+        clear_region_box(region);
+
+        if (brightness > 0) {
+            draw_region_fill(region, region_color_from_brightness(region, brightness));
+        }
+
+        last_region_brightness[idx] = brightness;
+        changed = true;
+    }
+
+    if (changed) {
+        draw_body_outline();
+    }
 }
 
 static void draw_score_screen(int score, bool pass) {
@@ -400,6 +512,14 @@ static void draw_score_screen(int score, bool pass) {
     }
 }
 
+static void flash_status(uint16_t color, int ms) {
+    clear_screen(color);
+    sleep_ms(ms);
+    clear_screen(BLACK);
+    draw_body_outline();
+    reset_region_cache();
+}
+
 // ================= HAPTIC =================
 static void haptic_init(void) {
     gpio_set_function(HAPTIC_PIN, GPIO_FUNC_PWM);
@@ -429,9 +549,20 @@ static inline float adc_counts_to_volts(uint16_t counts) {
     return ((float)counts * ADC_VREF) / ADC_MAX_COUNTS;
 }
 
+static inline int region_index(region_t region) {
+    switch (region) {
+        case REGION_FOREARM: return 0;
+        case REGION_BICEP:   return 1;
+        case REGION_CHEST:   return 2;
+        default:             return -1;
+    }
+}
+
 static void emg_adc_init(void) {
     adc_init();
     adc_gpio_init(EMG_FOREARM_PIN);
+    adc_gpio_init(EMG_BICEP_PIN);
+    adc_gpio_init(EMG_CHEST_PIN);
 }
 
 static uint16_t read_adc_channel(uint input) {
@@ -439,29 +570,44 @@ static uint16_t read_adc_channel(uint input) {
     return adc_read();
 }
 
-static float read_sensor_voltage_raw(void) {
+static float read_sensor_voltage_raw(region_t region) {
 #if DEBUG_NO_EMG
+    (void)region;
     return 0.0f;
 #else
-    uint16_t raw = read_adc_channel(0); // GPIO40 = ADC0
+    uint16_t raw = 0;
+
+    switch (region) {
+        case REGION_FOREARM: raw = read_adc_channel(0); break;
+        case REGION_BICEP:   raw = read_adc_channel(1); break;
+        case REGION_CHEST:   raw = read_adc_channel(2); break;
+        default: return 0.0f;
+    }
+
     float adc_v = adc_counts_to_volts(raw);
     return adc_v / EMG_SENSOR_TO_ADC_RATIO;
 #endif
 }
 
-static float read_sensor_voltage_filtered(void) {
-    float raw = read_sensor_voltage_raw();
-    emg_filtered = EMG_ALPHA * raw + (1.0f - EMG_ALPHA) * emg_filtered;
-    return emg_filtered;
+static void sample_all_emg(void) {
+    for (int r = 0; r < 3; r++) {
+        float raw = read_sensor_voltage_raw((region_t)r);
+        emg_filtered[r] = EMG_ALPHA * raw + (1.0f - EMG_ALPHA) * emg_filtered[r];
+    }
 }
 
-static bool forearm_active(void) {
-    float v = read_sensor_voltage_filtered();
-    return v >= SENSOR_THRESHOLD_VOLTS;
+static float read_sensor_voltage_filtered(region_t region) {
+    int idx = region_index(region);
+    if (idx < 0) return 0.0f;
+    return emg_filtered[idx];
 }
 
-static uint8_t forearm_brightness(void) {
-    float v = read_sensor_voltage_filtered();
+static bool region_active(region_t region) {
+    return read_sensor_voltage_filtered(region) >= SENSOR_THRESHOLD_VOLTS;
+}
+
+static uint8_t region_brightness(region_t region) {
+    float v = read_sensor_voltage_filtered(region);
     float x = (v - SENSOR_MIN_VOLTS) / (SENSOR_MAX_VOLTS - SENSOR_MIN_VOLTS);
 
     if (x < 0.0f) x = 0.0f;
@@ -471,14 +617,174 @@ static uint8_t forearm_brightness(void) {
     return (uint8_t)(x * 255.0f);
 }
 
-// ================= PATTERN =================
+static region_t strongest_active_region(void) {
+#if DEBUG_NO_EMG
+    return REGION_UNKNOWN;
+#else
+    float forearm = read_sensor_voltage_filtered(REGION_FOREARM);
+    float bicep   = read_sensor_voltage_filtered(REGION_BICEP);
+    float chest   = read_sensor_voltage_filtered(REGION_CHEST);
+
+    float max_v = forearm;
+    region_t best = REGION_FOREARM;
+
+    if (bicep > max_v) {
+        max_v = bicep;
+        best = REGION_BICEP;
+    }
+    if (chest > max_v) {
+        max_v = chest;
+        best = REGION_CHEST;
+    }
+
+    if (max_v >= SENSOR_THRESHOLD_VOLTS) return best;
+    return REGION_UNKNOWN;
+#endif
+}
+
+// ================= PATTERN + SD HELPERS =================
+static const char *region_name(region_t region) {
+    switch (region) {
+        case REGION_FOREARM: return "FOREARM";
+        case REGION_BICEP:   return "BICEP";
+        case REGION_CHEST:   return "CHEST";
+        default:             return "UNKNOWN";
+    }
+}
+
+static region_t region_from_string(const char *s) {
+    if (strcmp(s, "FOREARM") == 0) return REGION_FOREARM;
+    if (strcmp(s, "BICEP") == 0)   return REGION_BICEP;
+    if (strcmp(s, "CHEST") == 0)   return REGION_CHEST;
+    return REGION_UNKNOWN;
+}
+
 static void build_default_pattern(pattern_t *p) {
     p->count = 5;
-    p->events[0] = (pattern_event_t){ .start_ms = 0,    .duration_ms = BUZZ_MS, .region = REGION_FOREARM };
-    p->events[1] = (pattern_event_t){ .start_ms = 450,  .duration_ms = BUZZ_MS, .region = REGION_FOREARM };
-    p->events[2] = (pattern_event_t){ .start_ms = 900,  .duration_ms = BUZZ_MS, .region = REGION_FOREARM };
-    p->events[3] = (pattern_event_t){ .start_ms = 1450, .duration_ms = BUZZ_MS, .region = REGION_FOREARM };
-    p->events[4] = (pattern_event_t){ .start_ms = 2000, .duration_ms = BUZZ_MS, .region = REGION_FOREARM };
+    p->events[0] = (pattern_event_t){ .start_ms = 0,    .duration_ms = BUZZ_MS, .region = REGION_CHEST   };
+    p->events[1] = (pattern_event_t){ .start_ms = 450,  .duration_ms = BUZZ_MS, .region = REGION_CHEST   };
+    p->events[2] = (pattern_event_t){ .start_ms = 900,  .duration_ms = BUZZ_MS, .region = REGION_BICEP   };
+    p->events[3] = (pattern_event_t){ .start_ms = 1350, .duration_ms = BUZZ_MS, .region = REGION_FOREARM };
+    p->events[4] = (pattern_event_t){ .start_ms = 1800, .duration_ms = BUZZ_MS, .region = REGION_CHEST   };
+}
+
+static bool sd_mount_card(void) {
+    gpio_put(TFT_CS, 1);
+    gpio_put(SD_CS, 1);
+
+    FRESULT fr = f_mount(&fs, "0:", 1);
+    return fr == FR_OK;
+}
+
+static bool save_default_pattern_if_missing(const char *path) {
+    FIL fil;
+    FRESULT fr = f_open(&fil, path, FA_READ);
+    if (fr == FR_OK) {
+        f_close(&fil);
+        return true;
+    }
+
+    pattern_t p;
+    build_default_pattern(&p);
+
+    UINT bw;
+    fr = f_open(&fil, path, FA_CREATE_ALWAYS | FA_WRITE);
+    if (fr != FR_OK) return false;
+
+    const char *hdr = "start_ms,duration_ms,region\r\n";
+    if (f_write(&fil, hdr, (UINT)strlen(hdr), &bw) != FR_OK) {
+        f_close(&fil);
+        return false;
+    }
+
+    char line[96];
+    for (size_t i = 0; i < p.count; i++) {
+        int n = snprintf(line, sizeof(line), "%lu,%lu,%s\r\n",
+                         (unsigned long)p.events[i].start_ms,
+                         (unsigned long)p.events[i].duration_ms,
+                         region_name(p.events[i].region));
+        if (f_write(&fil, line, (UINT)n, &bw) != FR_OK) {
+            f_close(&fil);
+            return false;
+        }
+    }
+
+    f_close(&fil);
+    return true;
+}
+
+static bool load_pattern_csv(const char *path, pattern_t *p) {
+    FIL fil;
+    char line[96];
+
+    p->count = 0;
+    FRESULT fr = f_open(&fil, path, FA_READ);
+    if (fr != FR_OK) return false;
+
+    if (!f_gets(line, sizeof(line), &fil)) {
+        f_close(&fil);
+        return false;
+    }
+
+    while (f_gets(line, sizeof(line), &fil) && p->count < MAX_EVENTS) {
+        unsigned long start_ms = 0;
+        unsigned long duration_ms = 0;
+        char region_s[24] = {0};
+
+        if (sscanf(line, "%lu,%lu,%23s", &start_ms, &duration_ms, region_s) == 3) {
+            p->events[p->count].start_ms = (uint32_t)start_ms;
+            p->events[p->count].duration_ms = (uint32_t)duration_ms;
+            p->events[p->count].region = region_from_string(region_s);
+            if (p->events[p->count].region != REGION_UNKNOWN) {
+                p->count++;
+            }
+        }
+    }
+
+    f_close(&fil);
+    return p->count > 0;
+}
+
+static uint32_t get_next_user_index(const char *path) {
+    FIL fil;
+    char line[96];
+    uint32_t idx = 1;
+
+    FRESULT fr = f_open(&fil, path, FA_READ);
+    if (fr != FR_OK) return 1;
+
+    // skip header if present
+    f_gets(line, sizeof(line), &fil);
+
+    while (f_gets(line, sizeof(line), &fil)) {
+        if (strlen(line) > 2) idx++;
+    }
+
+    f_close(&fil);
+    return idx;
+}
+
+static void append_attempt_csv(const char *path, uint32_t score) {
+    FIL fil;
+    UINT bw;
+    uint32_t user_idx = get_next_user_index(path);
+
+    FRESULT fr = f_open(&fil, path, FA_OPEN_APPEND | FA_WRITE);
+    if (fr != FR_OK) {
+        fr = f_open(&fil, path, FA_CREATE_ALWAYS | FA_WRITE);
+        if (fr != FR_OK) return;
+
+        const char *hdr = "user,score\r\n";
+        f_write(&fil, hdr, (UINT)strlen(hdr), &bw);
+        user_idx = 1;
+    }
+
+    char line[64];
+    int n = snprintf(line, sizeof(line), "User %lu,%lu\r\n",
+                     (unsigned long)user_idx,
+                     (unsigned long)score);
+    f_write(&fil, line, (UINT)n, &bw);
+    f_close(&fil);
 }
 
 // ================= RESULT HAPTIC =================
@@ -494,6 +800,8 @@ static void show_result_pattern(bool pass) {
 
 // ================= PLAYBACK =================
 static void play_pattern(const pattern_t *p) {
+    draw_base_scene();
+
     absolute_time_t t0 = get_absolute_time();
 
     for (size_t i = 0; i < p->count; i++) {
@@ -502,34 +810,47 @@ static void play_pattern(const pattern_t *p) {
             sleep_ms(p->events[i].start_ms - elapsed);
         }
 
-        draw_forearm_overlay(255);
+        update_region_overlay(p->events[i].region, 255);
         haptic_buzz(700, p->events[i].duration_ms);
-        draw_base_scene();
+        update_region_overlay(p->events[i].region, 0);
     }
 }
 
 // ================= MATCHING =================
 static bool wait_until_released(uint32_t timeout_ms) {
     absolute_time_t t0 = get_absolute_time();
+
     while ((to_ms_since_boot(get_absolute_time()) - to_ms_since_boot(t0)) < timeout_ms) {
-        if (!forearm_active()) return true;
+        sample_all_emg();
+        bool any_active =
+            region_active(REGION_FOREARM) ||
+            region_active(REGION_BICEP) ||
+            region_active(REGION_CHEST);
+
+        if (!any_active) return true;
         sleep_ms(SAMPLE_PERIOD_MS);
     }
+
     return false;
 }
 
-static bool wait_for_forearm_activation(uint32_t window_ms, uint32_t *detected_ms) {
+static bool wait_for_expected_activation(region_t expected, uint32_t window_ms, uint32_t *detected_ms) {
     absolute_time_t t0 = get_absolute_time();
 
     while ((to_ms_since_boot(get_absolute_time()) - to_ms_since_boot(t0)) < window_ms) {
-        if (forearm_active()) {
+        sample_all_emg();
+
+        if (strongest_active_region() == expected) {
             *detected_ms = to_ms_since_boot(get_absolute_time()) - to_ms_since_boot(t0);
 
-            while (forearm_active()) {
+            while (1) {
+                sample_all_emg();
+                if (strongest_active_region() == REGION_UNKNOWN) break;
                 sleep_ms(SAMPLE_PERIOD_MS);
             }
             return true;
         }
+
         sleep_ms(SAMPLE_PERIOD_MS);
     }
 
@@ -539,6 +860,8 @@ static bool wait_for_forearm_activation(uint32_t window_ms, uint32_t *detected_m
 static uint32_t run_mimic_mode(const pattern_t *p, bool *pass_out) {
     wait_until_released(1500);
     sleep_ms(400);
+
+    draw_base_scene();
 
     absolute_time_t t0 = get_absolute_time();
     uint32_t total_error = 0;
@@ -550,25 +873,23 @@ static uint32_t run_mimic_mode(const pattern_t *p, bool *pass_out) {
             sleep_ms(p->events[i].start_ms - elapsed);
         }
 
-        draw_forearm_overlay(100);
+        update_region_overlay(p->events[i].region, 100);
 
         uint32_t detected_ms = 0;
-        bool matched = wait_for_forearm_activation(MATCH_WINDOW_MS, &detected_ms);
+        bool matched = wait_for_expected_activation(p->events[i].region, MATCH_WINDOW_MS, &detected_ms);
 
         if (!matched) {
             all_correct = false;
             total_error += MATCH_WINDOW_MS;
-            printf("Missed forearm pulse %u\n", (unsigned)i);
+            update_region_overlay(p->events[i].region, 0);
         } else {
             total_error += detected_ms;
 
-            uint8_t b = forearm_brightness();
+            uint8_t b = region_brightness(p->events[i].region);
             if (b < 80) b = 80;
-            draw_forearm_overlay(b);
+            update_region_overlay(p->events[i].region, b);
 
             haptic_buzz(220, 70);
-            printf("Matched forearm pulse %u, error=%lu ms\n",
-                   (unsigned)i, (unsigned long)detected_ms);
         }
     }
 
@@ -582,17 +903,26 @@ static uint32_t run_mimic_mode(const pattern_t *p, bool *pass_out) {
 
 // ================= LIVE MODE =================
 static void live_heatmap_loop(void) {
-    while (1) {
-        uint8_t b = forearm_brightness();
-        draw_forearm_overlay(b);
+    draw_base_scene();
 
-        if (forearm_active()) {
+    while (1) {
+        sample_all_emg();
+
+        uint8_t forearm_b = region_brightness(REGION_FOREARM);
+        uint8_t bicep_b   = region_brightness(REGION_BICEP);
+        uint8_t chest_b   = region_brightness(REGION_CHEST);
+
+        update_all_regions(forearm_b, bicep_b, chest_b);
+
+        if (region_active(REGION_FOREARM) ||
+            region_active(REGION_BICEP) ||
+            region_active(REGION_CHEST)) {
             haptic_set_strength(180);
         } else {
             haptic_set_strength(0);
         }
 
-        sleep_ms(70);
+        sleep_ms(LIVE_FRAME_MS);
     }
 }
 
@@ -601,14 +931,13 @@ int main(void) {
     stdio_init_all();
     sleep_ms(1200);
 
-    spi_init(TFT_SPI_PORT, 32000000);
-    gpio_set_function(TFT_SCK, GPIO_FUNC_SPI);
-    gpio_set_function(TFT_MOSI, GPIO_FUNC_SPI);
-    gpio_set_function(TFT_MISO, GPIO_FUNC_SPI);
-
     gpio_init(TFT_CS);
     gpio_set_dir(TFT_CS, GPIO_OUT);
     gpio_put(TFT_CS, 1);
+
+    gpio_init(SD_CS);
+    gpio_set_dir(SD_CS, GPIO_OUT);
+    gpio_put(SD_CS, 1);
 
     gpio_init(TFT_DC);
     gpio_set_dir(TFT_DC, GPIO_OUT);
@@ -616,43 +945,55 @@ int main(void) {
     gpio_init(TFT_RST);
     gpio_set_dir(TFT_RST, GPIO_OUT);
 
+    tft_restore_spi();
     tft_init();
     haptic_init();
     emg_adc_init();
-
     draw_base_scene();
 
     pattern_t pattern = {0};
-    build_default_pattern(&pattern);
 
-    printf("Forearm-only pattern loaded\n");
-    for (size_t i = 0; i < pattern.count; i++) {
-        printf("%u: forearm @ %lu ms for %lu ms\n",
-               (unsigned)i,
-               (unsigned long)pattern.events[i].start_ms,
-               (unsigned long)pattern.events[i].duration_ms);
+    sd_ok = sd_mount_card();
+    if (sd_ok) {
+        flash_status(GREEN, 180);
+        save_default_pattern_if_missing("0:/pattern.csv");
+        if (!load_pattern_csv("0:/pattern.csv", &pattern)) {
+            build_default_pattern(&pattern);
+        }
+
+        tft_restore_spi();
+        gpio_put(SD_CS, 1);
+        tft_init();
+        draw_base_scene();
+    } else {
+        flash_status(RED, 250);
+        build_default_pattern(&pattern);
     }
 
     sleep_ms(800);
 
-    // 1. Play target pattern
     play_pattern(&pattern);
 
-    // 2. Matching mode
     bool pass = false;
     uint32_t score = run_mimic_mode(&pattern, &pass);
 
-    // 3. Big centered score screen
+    if (sd_ok) {
+        append_attempt_csv("0:/attempts.csv", score);
+        flash_status(GREEN, 120);
+
+        tft_restore_spi();
+        gpio_put(SD_CS, 1);
+        tft_init();
+        draw_base_scene();
+    }
+
     draw_score_screen((int)score, pass);
     show_result_pattern(pass);
 
     printf("Final score: %lu, pass=%u\n", (unsigned long)score, pass ? 1 : 0);
 
     sleep_ms(SCORE_SHOW_MS);
-
-    // 4. Live forearm heatmap mode
     live_heatmap_loop();
 
     return 0;
 }
->>>>>>> 173166d (362 4/14 TFT with completion)
