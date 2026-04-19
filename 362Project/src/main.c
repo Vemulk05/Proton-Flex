@@ -42,6 +42,7 @@
 #define BLACK   0x0000
 #define WHITE   0xFFFF
 #define RED     0xF800
+#define GREEN   0x07E0
 #define CYAN    0x07FF
 #define DKGRAY  0x4208
 
@@ -103,6 +104,7 @@ static bool sd_ok = false;
 
 // ================= TFT LOW LEVEL =================
 static void tft_cmd(uint8_t cmd) {
+    gpio_put(SD_CS, 1);   // keep SD deselected on shared SPI bus
     gpio_put(TFT_DC, 0);
     gpio_put(TFT_CS, 0);
     spi_write_blocking(TFT_SPI_PORT, &cmd, 1);
@@ -110,6 +112,7 @@ static void tft_cmd(uint8_t cmd) {
 }
 
 static void tft_data(const uint8_t *d, size_t len) {
+    gpio_put(SD_CS, 1);   // keep SD deselected on shared SPI bus
     gpio_put(TFT_DC, 1);
     gpio_put(TFT_CS, 0);
     spi_write_blocking(TFT_SPI_PORT, d, len);
@@ -125,9 +128,14 @@ static void tft_restore_spi(void) {
     gpio_set_function(TFT_SCK, GPIO_FUNC_SPI);
     gpio_set_function(TFT_MOSI, GPIO_FUNC_SPI);
     gpio_set_function(TFT_MISO, GPIO_FUNC_SPI);
+    gpio_put(TFT_CS, 1);
+    gpio_put(SD_CS, 1);
 }
 
 static void tft_init(void) {
+    gpio_put(SD_CS, 1);
+    gpio_put(TFT_CS, 1);
+
     gpio_put(TFT_RST, 1);
     sleep_ms(5);
     gpio_put(TFT_RST, 0);
@@ -270,6 +278,7 @@ static void draw_percent_symbol(int x, int y, uint16_t c, int scale) {
 static void draw_body_outline(void) {
     int cx = 120;
 
+    // head
     for (int y = -16; y <= 16; y++) {
         for (int x = -13; x <= 13; x++) {
             if (x * x * 16 + y * y * 10 <= 13 * 13 * 16) {
@@ -278,38 +287,66 @@ static void draw_body_outline(void) {
         }
     }
 
-    bezier(cx - 4, 44, cx - 7, 50, cx - 5, 58, WHITE);
-    bezier(cx + 4, 44, cx + 7, 50, cx + 5, 58, WHITE);
+    // neck
+    bezier(cx - 5, 44, cx - 6, 52, cx - 5, 60, WHITE);
+    bezier(cx + 5, 44, cx + 6, 52, cx + 5, 60, WHITE);
 
-    bezier(cx - 5, 58, cx - 30, 50, cx - 48, 70, WHITE);
-    bezier(cx + 5, 58, cx + 30, 52, cx + 48, 72, WHITE);
+    // shoulder caps
+    bezier(cx - 5, 60, cx - 18, 63, cx - 34, 72, WHITE);
+    bezier(cx + 5, 60, cx + 18, 63, cx + 34, 72, WHITE);
 
-    bezier(cx - 48, 70, cx - 55, 90, cx - 42, 105, WHITE);
-    bezier(cx - 42, 105, cx - 28, 120, cx - 30, 135, WHITE);
-    bezier(cx - 30, 135, cx - 36, 150, cx - 40, 160, WHITE);
+    // torso side walls
+    bezier(cx - 34, 72, cx - 36, 112, cx - 30, 160, WHITE);
+    bezier(cx + 34, 72, cx + 36, 112, cx + 30, 160, WHITE);
 
-    bezier(cx + 48, 72, cx + 55, 92, cx + 42, 105, WHITE);
-    bezier(cx + 42, 105, cx + 28, 120, cx + 30, 135, WHITE);
-    bezier(cx + 30, 135, cx + 36, 150, cx + 40, 160, WHITE);
+    // connect shoulder underside to arm inner edge so the arm looks fully attached
+    line(cx - 34, 72, cx - 24, 76, WHITE);
+    line(cx + 34, 72, cx + 24, 76, WHITE);
 
-    for (int y = 60; y < 155; y += 3) {
+    // center line
+    for (int y = 64; y < 155; y += 3) {
         tft_pixel(cx, y, DKGRAY);
     }
 
-    bezier(cx - 48, 70, cx - 62, 90, cx - 62, 115, WHITE);
-    bezier(cx - 62, 115, cx - 64, 140, cx - 60, 162, WHITE);
-    bezier(cx - 38, 78, cx - 48, 100, cx - 48, 118, WHITE);
-    bezier(cx - 48, 118, cx - 50, 140, cx - 48, 160, WHITE);
-    bezier(cx - 60, 162, cx - 54, 168, cx - 48, 160, WHITE);
+    // left arm outer edge
+    bezier(cx - 34, 72, cx - 54, 82, cx - 62, 112, WHITE);
+    bezier(cx - 62, 112, cx - 66, 142, cx - 58, 166, WHITE);
 
-    bezier(cx + 48, 72, cx + 62, 92, cx + 62, 115, WHITE);
-    bezier(cx + 62, 115, cx + 64, 140, cx + 60, 162, WHITE);
-    bezier(cx + 38, 78, cx + 48, 100, cx + 48, 118, WHITE);
-    bezier(cx + 48, 118, cx + 50, 140, cx + 48, 160, WHITE);
-    bezier(cx + 60, 162, cx + 54, 168, cx + 48, 160, WHITE);
+    // left arm inner edge
+    bezier(cx - 24, 76, cx - 42, 88, cx - 48, 116, WHITE);
+    bezier(cx - 48, 116, cx - 50, 144, cx - 46, 166, WHITE);
 
-    line(cx - 40, 160, cx + 40, 160, WHITE);
-    line(cx - 3, 168, cx + 3, 168, WHITE);
+    // left wrist close
+    bezier(cx - 58, 166, cx - 52, 172, cx - 46, 166, WHITE);
+
+    // right arm outer edge
+    bezier(cx + 34, 72, cx + 54, 82, cx + 62, 112, WHITE);
+    bezier(cx + 62, 112, cx + 66, 142, cx + 58, 166, WHITE);
+
+    // right arm inner edge
+    bezier(cx + 24, 76, cx + 42, 88, cx + 48, 116, WHITE);
+    bezier(cx + 48, 116, cx + 50, 144, cx + 46, 166, WHITE);
+
+    // right wrist close
+    bezier(cx + 58, 166, cx + 52, 172, cx + 46, 166, WHITE);
+
+    // pelvis
+    line(cx - 30, 160, cx + 30, 160, WHITE);
+    line(cx - 4, 168, cx + 4, 168, WHITE);
+
+    // left leg
+    bezier(cx - 30, 160, cx - 28, 205, cx - 23, 246, WHITE);
+    bezier(cx - 23, 246, cx - 19, 274, cx - 17, 280, WHITE);
+    bezier(cx - 4, 168, cx - 10, 210, cx - 10, 250, WHITE);
+    bezier(cx - 10, 250, cx - 11, 270, cx - 12, 280, WHITE);
+    line(cx - 17, 280, cx - 12, 280, WHITE);
+
+    // right leg
+    bezier(cx + 30, 160, cx + 28, 205, cx + 23, 246, WHITE);
+    bezier(cx + 23, 246, cx + 19, 274, cx + 17, 280, WHITE);
+    bezier(cx + 4, 168, cx + 10, 210, cx + 10, 250, WHITE);
+    bezier(cx + 10, 250, cx + 11, 270, cx + 12, 280, WHITE);
+    line(cx + 17, 280, cx + 12, 280, WHITE);
 }
 
 // ================= REGION DRAW =================
@@ -318,13 +355,13 @@ static void draw_region_fill(region_t region, uint16_t color) {
 
     switch (region) {
         case REGION_FOREARM:
-            fill_ellipse(cx + 56, 140, 10, 20, color);
+            fill_ellipse(cx + 58, 142, 9, 20, color);
             break;
         case REGION_BICEP:
-            fill_ellipse(cx + 54, 98, 11, 18, color);
+            fill_ellipse(cx + 55, 102, 11, 17, color);
             break;
         case REGION_CHEST:
-            fill_ellipse(cx + 18, 92, 16, 18, color); // right chest only
+            fill_ellipse(cx + 14, 94, 14, 17, color);
             break;
         default:
             break;
@@ -336,15 +373,15 @@ static uint16_t region_color_from_brightness(region_t region, uint8_t b) {
 
     switch (region) {
         case REGION_FOREARM: {
-            uint8_t r5 = (b * 31) / 255;   // red
+            uint8_t r5 = (b * 31) / 255;
             return (uint16_t)(r5 << 11);
         }
         case REGION_BICEP: {
-            uint8_t g6 = (b * 63) / 255;   // green
+            uint8_t g6 = (b * 63) / 255;
             return (uint16_t)(g6 << 5);
         }
         case REGION_CHEST: {
-            uint8_t bl5 = (b * 31) / 255;  // blue
+            uint8_t bl5 = (b * 31) / 255;
             return (uint16_t)(bl5);
         }
         default:
@@ -355,13 +392,13 @@ static uint16_t region_color_from_brightness(region_t region, uint8_t b) {
 static void clear_region_box(region_t region) {
     switch (region) {
         case REGION_FOREARM:
-            clear_rect(163, 118, 189, 166);
+            clear_rect(164, 118, 188, 168);
             break;
         case REGION_BICEP:
-            clear_rect(161, 78, 187, 120);
+            clear_rect(160, 82, 184, 124);
             break;
         case REGION_CHEST:
-            clear_rect(120, 72, 156, 112);
+            clear_rect(116, 74, 148, 116);
             break;
         default:
             break;
@@ -401,9 +438,32 @@ static void update_region_overlay(region_t region, uint8_t brightness) {
 }
 
 static void update_all_regions(uint8_t forearm_b, uint8_t bicep_b, uint8_t chest_b) {
-    update_region_overlay(REGION_FOREARM, forearm_b);
-    update_region_overlay(REGION_BICEP, bicep_b);
-    update_region_overlay(REGION_CHEST, chest_b);
+    uint8_t vals[3] = { forearm_b, bicep_b, chest_b };
+    bool changed = false;
+
+    for (int idx = 0; idx < 3; idx++) {
+        uint8_t brightness = vals[idx];
+
+        if (last_region_brightness[idx] >= 0) {
+            int diff = (int)brightness - last_region_brightness[idx];
+            if (diff < 0) diff = -diff;
+            if (diff < 4) continue;
+        }
+
+        region_t region = (region_t)idx;
+        clear_region_box(region);
+
+        if (brightness > 0) {
+            draw_region_fill(region, region_color_from_brightness(region, brightness));
+        }
+
+        last_region_brightness[idx] = brightness;
+        changed = true;
+    }
+
+    if (changed) {
+        draw_body_outline();
+    }
 }
 
 static void draw_score_screen(int score, bool pass) {
@@ -450,6 +510,14 @@ static void draw_score_screen(int score, bool pass) {
             tft_pixel(xx, yy, bar_color);
         }
     }
+}
+
+static void flash_status(uint16_t color, int ms) {
+    clear_screen(color);
+    sleep_ms(ms);
+    clear_screen(BLACK);
+    draw_body_outline();
+    reset_region_cache();
 }
 
 // ================= HAPTIC =================
@@ -601,7 +669,7 @@ static void build_default_pattern(pattern_t *p) {
 }
 
 static bool sd_mount_card(void) {
-    gpio_put(TFT_CS, 1);   // de-select TFT before SD access
+    gpio_put(TFT_CS, 1);
     gpio_put(SD_CS, 1);
 
     FRESULT fr = f_mount(&fs, "0:", 1);
@@ -677,22 +745,44 @@ static bool load_pattern_csv(const char *path, pattern_t *p) {
     return p->count > 0;
 }
 
-static void append_attempt_csv(const char *path, uint32_t score, bool pass) {
+static uint32_t get_next_user_index(const char *path) {
+    FIL fil;
+    char line[96];
+    uint32_t idx = 1;
+
+    FRESULT fr = f_open(&fil, path, FA_READ);
+    if (fr != FR_OK) return 1;
+
+    // skip header if present
+    f_gets(line, sizeof(line), &fil);
+
+    while (f_gets(line, sizeof(line), &fil)) {
+        if (strlen(line) > 2) idx++;
+    }
+
+    f_close(&fil);
+    return idx;
+}
+
+static void append_attempt_csv(const char *path, uint32_t score) {
     FIL fil;
     UINT bw;
+    uint32_t user_idx = get_next_user_index(path);
 
     FRESULT fr = f_open(&fil, path, FA_OPEN_APPEND | FA_WRITE);
     if (fr != FR_OK) {
         fr = f_open(&fil, path, FA_CREATE_ALWAYS | FA_WRITE);
         if (fr != FR_OK) return;
 
-        const char *hdr = "score,pass\r\n";
+        const char *hdr = "user,score\r\n";
         f_write(&fil, hdr, (UINT)strlen(hdr), &bw);
+        user_idx = 1;
     }
 
-    char line[32];
-    int n = snprintf(line, sizeof(line), "%lu,%u\r\n",
-                     (unsigned long)score, pass ? 1 : 0);
+    char line[64];
+    int n = snprintf(line, sizeof(line), "User %lu,%lu\r\n",
+                     (unsigned long)user_idx,
+                     (unsigned long)score);
     f_write(&fil, line, (UINT)n, &bw);
     f_close(&fil);
 }
@@ -841,8 +931,6 @@ int main(void) {
     stdio_init_all();
     sleep_ms(1200);
 
-    tft_restore_spi();
-
     gpio_init(TFT_CS);
     gpio_set_dir(TFT_CS, GPIO_OUT);
     gpio_put(TFT_CS, 1);
@@ -857,24 +945,28 @@ int main(void) {
     gpio_init(TFT_RST);
     gpio_set_dir(TFT_RST, GPIO_OUT);
 
+    tft_restore_spi();
     tft_init();
     haptic_init();
     emg_adc_init();
-
     draw_base_scene();
 
     pattern_t pattern = {0};
 
     sd_ok = sd_mount_card();
     if (sd_ok) {
-        printf("SD mounted\n");
+        flash_status(GREEN, 180);
         save_default_pattern_if_missing("0:/pattern.csv");
         if (!load_pattern_csv("0:/pattern.csv", &pattern)) {
             build_default_pattern(&pattern);
         }
+
         tft_restore_spi();
+        gpio_put(SD_CS, 1);
+        tft_init();
+        draw_base_scene();
     } else {
-        printf("SD mount failed, using RAM pattern\n");
+        flash_status(RED, 250);
         build_default_pattern(&pattern);
     }
 
@@ -886,8 +978,13 @@ int main(void) {
     uint32_t score = run_mimic_mode(&pattern, &pass);
 
     if (sd_ok) {
-        append_attempt_csv("0:/attempts.csv", score, pass);
+        append_attempt_csv("0:/attempts.csv", score);
+        flash_status(GREEN, 120);
+
         tft_restore_spi();
+        gpio_put(SD_CS, 1);
+        tft_init();
+        draw_base_scene();
     }
 
     draw_score_screen((int)score, pass);
