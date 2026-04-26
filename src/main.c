@@ -33,10 +33,10 @@
 // RP2350B ADC mapping assumed:
 // GPIO40 -> ADC0 -> forearm
 // GPIO41 -> ADC1 -> bicep
-// GPIO42 -> ADC2 -> chest
-#define EMG_FOREARM_PIN 40
-#define EMG_BICEP_PIN   41
-#define EMG_CHEST_PIN   42
+// GPIO42 -> ADC2 -> quadricep
+#define EMG_FOREARM_PIN      40
+#define EMG_BICEP_PIN        41
+#define EMG_QUADRICEP_PIN    42
 
 // ================= COLORS =================
 #define BLACK   0x0000
@@ -47,11 +47,23 @@
 #define DKGRAY  0x4208
 
 // ================= TIMING =================
-#define BUZZ_MS           220
-#define MATCH_WINDOW_MS   350
-#define SAMPLE_PERIOD_MS  5
-#define SCORE_SHOW_MS     4000
-#define LIVE_FRAME_MS     70
+#define BUZZ_MS                 220
+#define MATCH_WINDOW_MS         350
+#define SAMPLE_PERIOD_MS        5
+#define SCORE_SHOW_MS           4000
+#define SCOREBOARD_SHOW_MS      3000
+#define LIVE_FRAME_MS           70
+
+// Random pattern timing
+#define RANDOM_PATTERN_COUNT    5
+#define MIN_EVENT_GAP_MS        420
+#define MAX_EVENT_GAP_MS        720
+#define MIN_EVENT_DUR_MS        170
+#define MAX_EVENT_DUR_MS        260
+
+// Classification robustness
+#define CLASSIFY_MARGIN_VOLTS     0.10f
+#define CLASSIFY_CONFIRM_SAMPLES  3
 
 // ================= EMG CONFIG =================
 #define ADC_VREF                3.3f
@@ -66,11 +78,12 @@
 #define DEBUG_NO_EMG            0
 
 #define MAX_EVENTS              16
+#define TOP_SCORES_COUNT        5
 
 typedef enum {
     REGION_FOREARM = 0,
-    REGION_BICEP   = 1,
-    REGION_CHEST   = 2,
+    REGION_BICEP = 1,
+    REGION_QUADRICEP = 2,
     REGION_UNKNOWN = 255
 } region_t;
 
@@ -84,6 +97,13 @@ typedef struct {
     pattern_event_t events[MAX_EVENTS];
     size_t count;
 } pattern_t;
+
+typedef struct {
+    bool responded;
+    bool correct_region;
+    region_t detected_region;
+    uint32_t detected_ms;
+} event_eval_t;
 
 // ================= ILI9341 =================
 #define ILI9341_SWRESET 0x01
@@ -254,6 +274,7 @@ static const uint8_t digits3x5[10][5] = {
 };
 
 static void draw_digit(int x, int y, int d, uint16_t c, int scale) {
+    if (d < 0 || d > 9) return;
     for (int row = 0; row < 5; row++) {
         for (int col = 0; col < 3; col++) {
             if (digits3x5[d][row] & (1 << col)) {
@@ -264,6 +285,19 @@ static void draw_digit(int x, int y, int d, uint16_t c, int scale) {
                 }
             }
         }
+    }
+}
+
+static void draw_number(int x, int y, int value, uint16_t c, int scale) {
+    char buf[8];
+    if (value < 0) value = 0;
+    if (value > 999) value = 999;
+
+    snprintf(buf, sizeof(buf), "%d", value);
+
+    for (int i = 0; buf[i] != '\0'; i++) {
+        draw_digit(x, y, buf[i] - '0', c, scale);
+        x += 4 * scale;
     }
 }
 
@@ -299,7 +333,7 @@ static void draw_body_outline(void) {
     bezier(cx - 34, 72, cx - 36, 112, cx - 30, 160, WHITE);
     bezier(cx + 34, 72, cx + 36, 112, cx + 30, 160, WHITE);
 
-    // connect shoulder underside to arm inner edge so the arm looks fully attached
+    // connect shoulder underside to arm inner edge
     line(cx - 34, 72, cx - 24, 76, WHITE);
     line(cx + 34, 72, cx + 24, 76, WHITE);
 
@@ -308,22 +342,22 @@ static void draw_body_outline(void) {
         tft_pixel(cx, y, DKGRAY);
     }
 
-    // left arm outer edge
+    // left arm outer
     bezier(cx - 34, 72, cx - 54, 82, cx - 62, 112, WHITE);
     bezier(cx - 62, 112, cx - 66, 142, cx - 58, 166, WHITE);
 
-    // left arm inner edge
+    // left arm inner
     bezier(cx - 24, 76, cx - 42, 88, cx - 48, 116, WHITE);
     bezier(cx - 48, 116, cx - 50, 144, cx - 46, 166, WHITE);
 
     // left wrist close
     bezier(cx - 58, 166, cx - 52, 172, cx - 46, 166, WHITE);
 
-    // right arm outer edge
+    // right arm outer
     bezier(cx + 34, 72, cx + 54, 82, cx + 62, 112, WHITE);
     bezier(cx + 62, 112, cx + 66, 142, cx + 58, 166, WHITE);
 
-    // right arm inner edge
+    // right arm inner
     bezier(cx + 24, 76, cx + 42, 88, cx + 48, 116, WHITE);
     bezier(cx + 48, 116, cx + 50, 144, cx + 46, 166, WHITE);
 
@@ -360,8 +394,8 @@ static void draw_region_fill(region_t region, uint16_t color) {
         case REGION_BICEP:
             fill_ellipse(cx + 55, 102, 11, 17, color);
             break;
-        case REGION_CHEST:
-            fill_ellipse(cx + 14, 94, 14, 17, color);
+        case REGION_QUADRICEP:
+            fill_ellipse(cx + 18, 210, 14, 22, color);
             break;
         default:
             break;
@@ -380,7 +414,7 @@ static uint16_t region_color_from_brightness(region_t region, uint8_t b) {
             uint8_t g6 = (b * 63) / 255;
             return (uint16_t)(g6 << 5);
         }
-        case REGION_CHEST: {
+        case REGION_QUADRICEP: {
             uint8_t bl5 = (b * 31) / 255;
             return (uint16_t)(bl5);
         }
@@ -397,8 +431,8 @@ static void clear_region_box(region_t region) {
         case REGION_BICEP:
             clear_rect(160, 82, 184, 124);
             break;
-        case REGION_CHEST:
-            clear_rect(116, 74, 148, 116);
+        case REGION_QUADRICEP:
+            clear_rect(120, 186, 152, 234);
             break;
         default:
             break;
@@ -418,7 +452,7 @@ static void draw_base_scene(void) {
 }
 
 static void update_region_overlay(region_t region, uint8_t brightness) {
-    if (region > REGION_CHEST) return;
+    if (region > REGION_QUADRICEP) return;
 
     int idx = (int)region;
     if (last_region_brightness[idx] >= 0) {
@@ -437,8 +471,8 @@ static void update_region_overlay(region_t region, uint8_t brightness) {
     last_region_brightness[idx] = brightness;
 }
 
-static void update_all_regions(uint8_t forearm_b, uint8_t bicep_b, uint8_t chest_b) {
-    uint8_t vals[3] = { forearm_b, bicep_b, chest_b };
+static void update_all_regions(uint8_t forearm_b, uint8_t bicep_b, uint8_t quadricep_b) {
+    uint8_t vals[3] = { forearm_b, bicep_b, quadricep_b };
     bool changed = false;
 
     for (int idx = 0; idx < 3; idx++) {
@@ -512,6 +546,40 @@ static void draw_score_screen(int score, bool pass) {
     }
 }
 
+static void draw_top_scores_screen(const int scores[TOP_SCORES_COUNT], size_t count) {
+    clear_screen(BLACK);
+
+    // outer border
+    line(25, 20, 215, 20, WHITE);
+    line(215, 20, 215, 300, WHITE);
+    line(215, 300, 25, 300, WHITE);
+    line(25, 300, 25, 20, WHITE);
+
+    // header divider
+    line(25, 50, 215, 50, WHITE);
+
+    // big "5" header
+    draw_digit(112, 26, 5, CYAN, 4);
+
+    for (size_t i = 0; i < count && i < TOP_SCORES_COUNT; i++) {
+        int y = 65 + (int)i * 45;
+
+        // rank
+        draw_digit(45, y, (int)(i + 1), WHITE, 4);
+
+        // separator
+        line(78, y + 10, 92, y + 10, WHITE);
+
+        // score
+        draw_number(110, y, scores[i], CYAN, 4);
+        draw_percent_symbol(160, y + 6, CYAN, 2);
+
+        if (i < TOP_SCORES_COUNT - 1) {
+            line(40, y + 34, 200, y + 34, DKGRAY);
+        }
+    }
+}
+
 static void flash_status(uint16_t color, int ms) {
     clear_screen(color);
     sleep_ms(ms);
@@ -551,10 +619,10 @@ static inline float adc_counts_to_volts(uint16_t counts) {
 
 static inline int region_index(region_t region) {
     switch (region) {
-        case REGION_FOREARM: return 0;
-        case REGION_BICEP:   return 1;
-        case REGION_CHEST:   return 2;
-        default:             return -1;
+        case REGION_FOREARM:   return 0;
+        case REGION_BICEP:     return 1;
+        case REGION_QUADRICEP: return 2;
+        default:               return -1;
     }
 }
 
@@ -562,7 +630,7 @@ static void emg_adc_init(void) {
     adc_init();
     adc_gpio_init(EMG_FOREARM_PIN);
     adc_gpio_init(EMG_BICEP_PIN);
-    adc_gpio_init(EMG_CHEST_PIN);
+    adc_gpio_init(EMG_QUADRICEP_PIN);
 }
 
 static uint16_t read_adc_channel(uint input) {
@@ -578,9 +646,9 @@ static float read_sensor_voltage_raw(region_t region) {
     uint16_t raw = 0;
 
     switch (region) {
-        case REGION_FOREARM: raw = read_adc_channel(0); break;
-        case REGION_BICEP:   raw = read_adc_channel(1); break;
-        case REGION_CHEST:   raw = read_adc_channel(2); break;
+        case REGION_FOREARM:   raw = read_adc_channel(0); break;
+        case REGION_BICEP:     raw = read_adc_channel(1); break;
+        case REGION_QUADRICEP: raw = read_adc_channel(2); break;
         default: return 0.0f;
     }
 
@@ -621,9 +689,9 @@ static region_t strongest_active_region(void) {
 #if DEBUG_NO_EMG
     return REGION_UNKNOWN;
 #else
-    float forearm = read_sensor_voltage_filtered(REGION_FOREARM);
-    float bicep   = read_sensor_voltage_filtered(REGION_BICEP);
-    float chest   = read_sensor_voltage_filtered(REGION_CHEST);
+    float forearm   = read_sensor_voltage_filtered(REGION_FOREARM);
+    float bicep     = read_sensor_voltage_filtered(REGION_BICEP);
+    float quadricep = read_sensor_voltage_filtered(REGION_QUADRICEP);
 
     float max_v = forearm;
     region_t best = REGION_FOREARM;
@@ -632,9 +700,9 @@ static region_t strongest_active_region(void) {
         max_v = bicep;
         best = REGION_BICEP;
     }
-    if (chest > max_v) {
-        max_v = chest;
-        best = REGION_CHEST;
+    if (quadricep > max_v) {
+        max_v = quadricep;
+        best = REGION_QUADRICEP;
     }
 
     if (max_v >= SENSOR_THRESHOLD_VOLTS) return best;
@@ -642,53 +710,114 @@ static region_t strongest_active_region(void) {
 #endif
 }
 
+static region_t classify_region_strict(void) {
+#if DEBUG_NO_EMG
+    return REGION_UNKNOWN;
+#else
+    float vals[3] = {
+        read_sensor_voltage_filtered(REGION_FOREARM),
+        read_sensor_voltage_filtered(REGION_BICEP),
+        read_sensor_voltage_filtered(REGION_QUADRICEP)
+    };
+
+    int best_idx = 0;
+    int second_idx = 1;
+
+    if (vals[second_idx] > vals[best_idx]) {
+        int tmp = best_idx;
+        best_idx = second_idx;
+        second_idx = tmp;
+    }
+
+    for (int i = 2; i < 3; i++) {
+        if (vals[i] > vals[best_idx]) {
+            second_idx = best_idx;
+            best_idx = i;
+        } else if (vals[i] > vals[second_idx]) {
+            second_idx = i;
+        }
+    }
+
+    float best_v = vals[best_idx];
+    float second_v = vals[second_idx];
+
+    if (best_v < SENSOR_THRESHOLD_VOLTS) return REGION_UNKNOWN;
+    if ((best_v - second_v) < CLASSIFY_MARGIN_VOLTS) return REGION_UNKNOWN;
+
+    return (region_t)best_idx;
+#endif
+}
+
 // ================= PATTERN + SD HELPERS =================
 static const char *region_name(region_t region) {
     switch (region) {
-        case REGION_FOREARM: return "FOREARM";
-        case REGION_BICEP:   return "BICEP";
-        case REGION_CHEST:   return "CHEST";
-        default:             return "UNKNOWN";
+        case REGION_FOREARM:   return "FOREARM";
+        case REGION_BICEP:     return "BICEP";
+        case REGION_QUADRICEP: return "QUADRICEP";
+        default:               return "UNKNOWN";
     }
 }
 
 static region_t region_from_string(const char *s) {
-    if (strcmp(s, "FOREARM") == 0) return REGION_FOREARM;
-    if (strcmp(s, "BICEP") == 0)   return REGION_BICEP;
-    if (strcmp(s, "CHEST") == 0)   return REGION_CHEST;
+    if (strcmp(s, "FOREARM") == 0)   return REGION_FOREARM;
+    if (strcmp(s, "BICEP") == 0)     return REGION_BICEP;
+    if (strcmp(s, "QUADRICEP") == 0) return REGION_QUADRICEP;
     return REGION_UNKNOWN;
 }
 
-static void build_default_pattern(pattern_t *p) {
-    p->count = 5;
-    p->events[0] = (pattern_event_t){ .start_ms = 0,    .duration_ms = BUZZ_MS, .region = REGION_CHEST   };
-    p->events[1] = (pattern_event_t){ .start_ms = 450,  .duration_ms = BUZZ_MS, .region = REGION_CHEST   };
-    p->events[2] = (pattern_event_t){ .start_ms = 900,  .duration_ms = BUZZ_MS, .region = REGION_BICEP   };
-    p->events[3] = (pattern_event_t){ .start_ms = 1350, .duration_ms = BUZZ_MS, .region = REGION_FOREARM };
-    p->events[4] = (pattern_event_t){ .start_ms = 1800, .duration_ms = BUZZ_MS, .region = REGION_CHEST   };
+static uint32_t rand_range_u32(uint32_t lo, uint32_t hi) {
+    if (hi <= lo) return lo;
+    return lo + (uint32_t)(rand() % (int)(hi - lo + 1));
 }
 
-static bool sd_mount_card(void) {
-    gpio_put(TFT_CS, 1);
-    gpio_put(SD_CS, 1);
+static void seed_random_pattern(void) {
+    uint32_t seed = (uint32_t)to_ms_since_boot(get_absolute_time());
 
-    FRESULT fr = f_mount(&fs, "0:", 1);
-    return fr == FR_OK;
+#if !DEBUG_NO_EMG
+    seed ^= ((uint32_t)read_adc_channel(0) << 0);
+    seed ^= ((uint32_t)read_adc_channel(1) << 10);
+    seed ^= ((uint32_t)read_adc_channel(2) << 20);
+#endif
+
+    if (seed == 0) seed = 1;
+    srand(seed);
 }
 
-static bool save_default_pattern_if_missing(const char *path) {
-    FIL fil;
-    FRESULT fr = f_open(&fil, path, FA_READ);
-    if (fr == FR_OK) {
-        f_close(&fil);
-        return true;
+static region_t random_region_no_triple(region_t prev1, region_t prev2) {
+    region_t r;
+    do {
+        r = (region_t)(rand() % 3);
+    } while (prev1 == prev2 && r == prev1);
+    return r;
+}
+
+static void build_random_pattern(pattern_t *p) {
+    p->count = RANDOM_PATTERN_COUNT;
+
+    uint32_t t = 0;
+    region_t prev1 = REGION_UNKNOWN;
+    region_t prev2 = REGION_UNKNOWN;
+
+    for (size_t i = 0; i < p->count; i++) {
+        region_t r = random_region_no_triple(prev1, prev2);
+        uint32_t dur = rand_range_u32(MIN_EVENT_DUR_MS, MAX_EVENT_DUR_MS);
+
+        p->events[i].start_ms = t;
+        p->events[i].duration_ms = dur;
+        p->events[i].region = r;
+
+        t += rand_range_u32(MIN_EVENT_GAP_MS, MAX_EVENT_GAP_MS);
+
+        prev2 = prev1;
+        prev1 = r;
     }
+}
 
-    pattern_t p;
-    build_default_pattern(&p);
-
+static bool save_pattern_csv(const char *path, const pattern_t *p) {
+    FIL fil;
     UINT bw;
-    fr = f_open(&fil, path, FA_CREATE_ALWAYS | FA_WRITE);
+
+    FRESULT fr = f_open(&fil, path, FA_CREATE_ALWAYS | FA_WRITE);
     if (fr != FR_OK) return false;
 
     const char *hdr = "start_ms,duration_ms,region\r\n";
@@ -698,11 +827,11 @@ static bool save_default_pattern_if_missing(const char *path) {
     }
 
     char line[96];
-    for (size_t i = 0; i < p.count; i++) {
+    for (size_t i = 0; i < p->count; i++) {
         int n = snprintf(line, sizeof(line), "%lu,%lu,%s\r\n",
-                         (unsigned long)p.events[i].start_ms,
-                         (unsigned long)p.events[i].duration_ms,
-                         region_name(p.events[i].region));
+                         (unsigned long)p->events[i].start_ms,
+                         (unsigned long)p->events[i].duration_ms,
+                         region_name(p->events[i].region));
         if (f_write(&fil, line, (UINT)n, &bw) != FR_OK) {
             f_close(&fil);
             return false;
@@ -753,7 +882,7 @@ static uint32_t get_next_user_index(const char *path) {
     FRESULT fr = f_open(&fil, path, FA_READ);
     if (fr != FR_OK) return 1;
 
-    // skip header if present
+    // skip header
     f_gets(line, sizeof(line), &fil);
 
     while (f_gets(line, sizeof(line), &fil)) {
@@ -785,6 +914,55 @@ static void append_attempt_csv(const char *path, uint32_t score) {
                      (unsigned long)score);
     f_write(&fil, line, (UINT)n, &bw);
     f_close(&fil);
+}
+
+static size_t load_top_scores_csv(const char *path, int out_scores[TOP_SCORES_COUNT]) {
+    FIL fil;
+    char line[96];
+
+    for (int i = 0; i < TOP_SCORES_COUNT; i++) {
+        out_scores[i] = -1;
+    }
+
+    FRESULT fr = f_open(&fil, path, FA_READ);
+    if (fr != FR_OK) return 0;
+
+    // skip header
+    if (!f_gets(line, sizeof(line), &fil)) {
+        f_close(&fil);
+        return 0;
+    }
+
+    while (f_gets(line, sizeof(line), &fil)) {
+        char *comma = strrchr(line, ',');
+        if (!comma) continue;
+
+        int score = atoi(comma + 1);
+        if (score < 0) score = 0;
+        if (score > 100) score = 100;
+
+        for (size_t pos = 0; pos < TOP_SCORES_COUNT; pos++) {
+            if (out_scores[pos] < score) {
+                for (size_t j = TOP_SCORES_COUNT - 1; j > pos; j--) {
+                    out_scores[j] = out_scores[j - 1];
+                }
+                out_scores[pos] = score;
+                break;
+            } else if (out_scores[pos] == -1) {
+                out_scores[pos] = score;
+                break;
+            }
+        }
+    }
+
+    f_close(&fil);
+
+    size_t count = 0;
+    for (int i = 0; i < TOP_SCORES_COUNT; i++) {
+        if (out_scores[i] >= 0) count++;
+    }
+
+    return count;
 }
 
 // ================= RESULT HAPTIC =================
@@ -825,7 +1003,7 @@ static bool wait_until_released(uint32_t timeout_ms) {
         bool any_active =
             region_active(REGION_FOREARM) ||
             region_active(REGION_BICEP) ||
-            region_active(REGION_CHEST);
+            region_active(REGION_QUADRICEP);
 
         if (!any_active) return true;
         sleep_ms(SAMPLE_PERIOD_MS);
@@ -834,27 +1012,53 @@ static bool wait_until_released(uint32_t timeout_ms) {
     return false;
 }
 
-static bool wait_for_expected_activation(region_t expected, uint32_t window_ms, uint32_t *detected_ms) {
+static event_eval_t wait_for_response(region_t expected, uint32_t window_ms) {
+    event_eval_t ev = {
+        .responded = false,
+        .correct_region = false,
+        .detected_region = REGION_UNKNOWN,
+        .detected_ms = window_ms
+    };
+
     absolute_time_t t0 = get_absolute_time();
+    region_t candidate = REGION_UNKNOWN;
+    int confirm_count = 0;
 
     while ((to_ms_since_boot(get_absolute_time()) - to_ms_since_boot(t0)) < window_ms) {
         sample_all_emg();
 
-        if (strongest_active_region() == expected) {
-            *detected_ms = to_ms_since_boot(get_absolute_time()) - to_ms_since_boot(t0);
+        region_t r = classify_region_strict();
 
-            while (1) {
-                sample_all_emg();
-                if (strongest_active_region() == REGION_UNKNOWN) break;
-                sleep_ms(SAMPLE_PERIOD_MS);
+        if (r == REGION_UNKNOWN) {
+            candidate = REGION_UNKNOWN;
+            confirm_count = 0;
+        } else {
+            if (r == candidate) {
+                confirm_count++;
+            } else {
+                candidate = r;
+                confirm_count = 1;
             }
-            return true;
+
+            if (confirm_count >= CLASSIFY_CONFIRM_SAMPLES) {
+                ev.responded = true;
+                ev.detected_region = r;
+                ev.detected_ms = to_ms_since_boot(get_absolute_time()) - to_ms_since_boot(t0);
+                ev.correct_region = (r == expected);
+
+                while (1) {
+                    sample_all_emg();
+                    if (strongest_active_region() == REGION_UNKNOWN) break;
+                    sleep_ms(SAMPLE_PERIOD_MS);
+                }
+                return ev;
+            }
         }
 
         sleep_ms(SAMPLE_PERIOD_MS);
     }
 
-    return false;
+    return ev;
 }
 
 static uint32_t run_mimic_mode(const pattern_t *p, bool *pass_out) {
@@ -864,8 +1068,8 @@ static uint32_t run_mimic_mode(const pattern_t *p, bool *pass_out) {
     draw_base_scene();
 
     absolute_time_t t0 = get_absolute_time();
-    uint32_t total_error = 0;
-    bool all_correct = true;
+    uint32_t total_score = 0;
+    size_t correct_count = 0;
 
     for (size_t i = 0; i < p->count; i++) {
         uint32_t elapsed = to_ms_since_boot(get_absolute_time()) - to_ms_since_boot(t0);
@@ -875,29 +1079,31 @@ static uint32_t run_mimic_mode(const pattern_t *p, bool *pass_out) {
 
         update_region_overlay(p->events[i].region, 100);
 
-        uint32_t detected_ms = 0;
-        bool matched = wait_for_expected_activation(p->events[i].region, MATCH_WINDOW_MS, &detected_ms);
+        event_eval_t ev = wait_for_response(p->events[i].region, MATCH_WINDOW_MS);
+        uint32_t event_score = 0;
 
-        if (!matched) {
-            all_correct = false;
-            total_error += MATCH_WINDOW_MS;
+        if (!ev.responded) {
+            update_region_overlay(p->events[i].region, 0);
+        } else if (!ev.correct_region) {
             update_region_overlay(p->events[i].region, 0);
         } else {
-            total_error += detected_ms;
+            event_score = 100 - ((100 * ev.detected_ms) / MATCH_WINDOW_MS);
+            if (event_score > 100) event_score = 0;
 
             uint8_t b = region_brightness(p->events[i].region);
             if (b < 80) b = 80;
             update_region_overlay(p->events[i].region, b);
 
             haptic_buzz(220, 70);
+            correct_count++;
         }
+
+        total_score += event_score;
     }
 
-    uint32_t max_error = (uint32_t)p->count * MATCH_WINDOW_MS;
-    if (total_error > max_error) total_error = max_error;
+    uint32_t score = total_score / p->count;
+    *pass_out = (score >= 60) && (correct_count >= 7);
 
-    uint32_t score = 100 - ((100 * total_error) / max_error);
-    *pass_out = all_correct && (score >= 60);
     return score;
 }
 
@@ -909,14 +1115,14 @@ static void live_heatmap_loop(void) {
         sample_all_emg();
 
         uint8_t forearm_b = region_brightness(REGION_FOREARM);
-        uint8_t bicep_b   = region_brightness(REGION_BICEP);
-        uint8_t chest_b   = region_brightness(REGION_CHEST);
+        uint8_t bicep_b = region_brightness(REGION_BICEP);
+        uint8_t quadricep_b = region_brightness(REGION_QUADRICEP);
 
-        update_all_regions(forearm_b, bicep_b, chest_b);
+        update_all_regions(forearm_b, bicep_b, quadricep_b);
 
         if (region_active(REGION_FOREARM) ||
             region_active(REGION_BICEP) ||
-            region_active(REGION_CHEST)) {
+            region_active(REGION_QUADRICEP)) {
             haptic_set_strength(180);
         } else {
             haptic_set_strength(0);
@@ -924,6 +1130,14 @@ static void live_heatmap_loop(void) {
 
         sleep_ms(LIVE_FRAME_MS);
     }
+}
+
+static bool sd_mount_card(void) {
+    gpio_put(TFT_CS, 1);
+    gpio_put(SD_CS, 1);
+
+    FRESULT fr = f_mount(&fs, "0:", 1);
+    return fr == FR_OK;
 }
 
 // ================= MAIN =================
@@ -952,13 +1166,23 @@ int main(void) {
     draw_base_scene();
 
     pattern_t pattern = {0};
+    int top_scores[TOP_SCORES_COUNT] = {0};
+    size_t top_score_count = 0;
+
+    seed_random_pattern();
+    build_random_pattern(&pattern);
 
     sd_ok = sd_mount_card();
     if (sd_ok) {
         flash_status(GREEN, 180);
-        save_default_pattern_if_missing("0:/pattern.csv");
-        if (!load_pattern_csv("0:/pattern.csv", &pattern)) {
-            build_default_pattern(&pattern);
+
+        // Save exact random pattern used this run
+        save_pattern_csv("0:/pattern.csv", &pattern);
+
+        // Re-load from SD so the SD copy is the source of truth
+        pattern_t loaded = {0};
+        if (load_pattern_csv("0:/pattern.csv", &loaded)) {
+            pattern = loaded;
         }
 
         tft_restore_spi();
@@ -967,7 +1191,6 @@ int main(void) {
         draw_base_scene();
     } else {
         flash_status(RED, 250);
-        build_default_pattern(&pattern);
     }
 
     sleep_ms(800);
@@ -979,12 +1202,14 @@ int main(void) {
 
     if (sd_ok) {
         append_attempt_csv("0:/attempts.csv", score);
-        flash_status(GREEN, 120);
+        top_score_count = load_top_scores_csv("0:/attempts.csv", top_scores);
 
         tft_restore_spi();
         gpio_put(SD_CS, 1);
         tft_init();
         draw_base_scene();
+
+        flash_status(GREEN, 120);
     }
 
     draw_score_screen((int)score, pass);
@@ -993,6 +1218,12 @@ int main(void) {
     printf("Final score: %lu, pass=%u\n", (unsigned long)score, pass ? 1 : 0);
 
     sleep_ms(SCORE_SHOW_MS);
+
+    if (sd_ok && top_score_count > 0) {
+        draw_top_scores_screen(top_scores, top_score_count);
+        sleep_ms(SCOREBOARD_SHOW_MS);
+    }
+
     live_heatmap_loop();
 
     return 0;
